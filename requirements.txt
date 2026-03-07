@@ -1,0 +1,8 @@
+Flask
+requests
+polyline
+python-dotenv
+ultralytics
+opencv-python
+numpy
+gunicorn

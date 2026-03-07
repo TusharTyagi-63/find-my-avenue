@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hazard Detection</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="navbar">
+    <a href="/">Routes</a>
+    <a href="/hazard">Hazard Detection</a>
+</div>
+
+<h2 style="text-align:center;">Upload Road Video</h2>
+
+<div style="text-align:center;">
+    <input type="file" id="videoInput">
+    <button onclick="analyze()">Analyze</button>
+</div>
+
+<div id="result" style="text-align:center; margin-top:20px;"></div>
+
+<script>
+async function analyze() {
+
+    let file = document.getElementById("videoInput").files[0];
+    let formData = new FormData();
+    formData.append("video", file);
+
+    let res = await fetch("/api/hazard", {
+        method: "POST",
+        body: formData
+    });
+
+    let data = await res.json();
+
+    document.getElementById("result").innerHTML =
+        `Hazards Detected: ${data.hazards_detected}<br>
+         Hazard Density: ${data.hazard_density}%`;
+}
+</script>
+
+</body>
+</html>

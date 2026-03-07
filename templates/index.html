@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Find My Avenue</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+</head>
+
+<body>
+
+<div class="navbar">
+    <input id="startInput" placeholder="Start Location">
+    <input id="endInput" placeholder="End Location">
+
+    <select id="modeSelect">
+        <option>Driving</option>
+    </select>
+
+    <button id="myLocationBtn">My Location</button>
+    <button id="getRouteBtn">Get Route</button>
+
+    <label>
+        <input type="checkbox" id="trafficToggle"> Traffic
+    </label>
+</div>
+
+<div id="summaryBar"></div>
+<div id="map"></div>
+
+<script>
+
+var map = L.map('map').setView([28.6, 77.2], 6);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+var trafficLayer = L.tileLayer(
+    "https://{s}.tile.opentrafficmap.org/traffic/{z}/{x}/{y}.png"
+);
+
+document.getElementById("trafficToggle").onchange = function() {
+    if (this.checked) map.addLayer(trafficLayer);
+    else map.removeLayer(trafficLayer);
+};
+
+document.getElementById("myLocationBtn").onclick = function() {
+    navigator.geolocation.getCurrentPosition(function(pos) {
+        document.getElementById("startInput").value =
+            pos.coords.latitude + "," + pos.coords.longitude;
+    });
+};
+
+document.getElementById("getRouteBtn").onclick = async function() {
+
+    let start = document.getElementById("startInput").value;
+    let end = document.getElementById("endInput").value;
+
+    let response = await fetch("/api/route", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({start: start, end: end})
+    });
+
+    let data = await response.json();
+
+    if (!data.routes) return;
+
+    map.eachLayer(function(layer) {
+        if (layer instanceof L.Polyline) map.removeLayer(layer);
+    });
+
+    let allCoords = [];
+
+    data.routes.forEach((route, index) => {
+
+        let color = index === 0 ? "lime" : "red";
+
+        let poly = L.polyline(route.coords, {
+            color: color,
+            weight: 6
+        }).addTo(map);
+
+        allCoords = allCoords.concat(route.coords);
+
+        if (index === 0) {
+            document.getElementById("summaryBar").innerHTML =
+                `Distance: ${route.distance} km | Duration: ${route.duration} min | Risk: ${route.risk}% (Recommended)`;
+        }
+    });
+
+    map.fitBounds(L.latLngBounds(allCoords));
+};
+
+</script>
+
+</body>
+</html>
