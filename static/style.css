@@ -1,40 +1,43 @@
-body {
-    margin: 0;
-    font-family: Arial;
-    background: #0f172a;
-    color: white;
+body{
+font-family:Arial,Helvetica,sans-serif;
+margin:0;
+background:#0f172a;
+color:white;
 }
 
-.navbar {
-    display: flex;
-    gap: 10px;
-    padding: 15px;
-    background: #1e293b;
+.navbar{
+display:flex;
+gap:20px;
+padding:12px;
+background:#1e293b;
 }
 
-.navbar input, .navbar select {
-    padding: 6px;
-    border-radius: 6px;
-    border: none;
+.navbar a{
+color:white;
+text-decoration:none;
+font-weight:bold;
 }
 
-button {
-    background: #2563eb;
-    color: white;
-    border: none;
-    padding: 6px 12px;
-    border-radius: 6px;
-    cursor: pointer;
+.controls{
+padding:10px;
+background:#1e293b;
+display:flex;
+gap:10px;
 }
 
-#map {
-    height: 85vh;
-    width: 100%;
+#map{
+height:90vh;
+width:100%;
 }
 
-#summaryBar {
-    padding: 10px;
-    background: #111827;
-    text-align: center;
-    font-weight: bold;
+input,select,button{
+padding:8px;
+border:none;
+border-radius:4px;
+}
+
+button{
+background:#3b82f6;
+color:white;
+cursor:pointer;
 }

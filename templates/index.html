@@ -1,52 +1,18 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Find My Avenue - Smart Routes</title>
 
-<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<title>Find My Avenue</title>
 
-<style>
-body{
-margin:0;
-font-family:Arial;
-background:#0b1a2f;
-}
+<link rel="stylesheet" href="/static/style.css">
 
-.navbar{
-background:#16273f;
-padding:10px;
-display:flex;
-align-items:center;
-gap:10px;
-}
+<link
+rel="stylesheet"
+href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
 
-.navbar a{
-color:#8fd0ff;
-text-decoration:none;
-font-weight:bold;
-margin-right:10px;
-}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-input,select{
-padding:8px;
-border-radius:5px;
-border:none;
-}
-
-button{
-padding:8px 14px;
-background:#2e6bff;
-color:white;
-border:none;
-border-radius:6px;
-cursor:pointer;
-}
-
-#map{
-height:85vh;
-width:100%;
-}
-</style>
 </head>
 
 <body>
@@ -55,83 +21,118 @@ width:100%;
 
 <a href="/">Routes</a>
 <a href="/hazard">Hazard Detection</a>
+<a href="/dashboard">Dashboard</a>
 
-<input id="start" placeholder="Start">
-<input id="end" placeholder="End">
+</div>
 
-<select>
-<option>Driving</option>
+<div class="controls">
+
+<input id="start" placeholder="lat,lon">
+
+<input id="end" placeholder="destination">
+
+<select id="mode">
+
+<option value="driving-car">Driving</option>
+<option value="cycling-regular">Cycling</option>
+<option value="foot-walking">Walking</option>
+
 </select>
 
-<button onclick="getLocation()">My Location</button>
-<button onclick="getRoute()">Get Route</button>
+<button onclick="findRoute()">Find Route</button>
 
-<label style="color:white;">
-<input type="checkbox" checked> Traffic
-</label>
+<button onclick="toggleTraffic()">Traffic</button>
 
 </div>
 
 <div id="map"></div>
 
-<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-
 <script>
 
-var map = L.map('map').setView([28.67,77.21],7);
+let map=L.map("map").setView([28.67,78.49],10)
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-attribution:'© OpenStreetMap'
-}).addTo(map);
+L.tileLayer(
+"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+{
+attribution:"OSM"
+}
+).addTo(map)
 
-var routeLine;
+let routeLayers=[]
 
+function clearRoutes(){
 
-function getLocation(){
+routeLayers.forEach(l=>map.removeLayer(l))
+routeLayers=[]
 
-navigator.geolocation.getCurrentPosition(function(pos){
-
-var lat=pos.coords.latitude;
-var lon=pos.coords.longitude;
-
-document.getElementById("start").value = lat+","+lon;
-
-map.setView([lat,lon],12);
-
-L.marker([lat,lon]).addTo(map);
-
-});
 }
 
+async function findRoute(){
 
-async function getRoute(){
+clearRoutes()
 
-let start=document.getElementById("start").value;
-let end=document.getElementById("end").value;
+let start=document.getElementById("start").value
+let end=document.getElementById("end").value
+let mode=document.getElementById("mode").value
 
-let res = await fetch("/get_route",{
+const res=await fetch("/route",{
+
 method:"POST",
-headers:{"Content-Type":"application/json"},
-body:JSON.stringify({start:start,end:end})
-});
 
-let data = await res.json();
+headers:{
+"Content-Type":"application/json"
+},
 
-if(!data.route){
-alert("Route failed");
-return;
+body:JSON.stringify({
+start:start,
+end:end,
+mode:mode
+})
+
+})
+
+const data=await res.json()
+
+if(!data.routes){
+alert("Route failed")
+return
 }
 
-let coords=data.route.map(p=>[p[0],p[1]]);
+data.routes.forEach((route,i)=>{
 
-if(routeLine) map.removeLayer(routeLine);
+let color="green"
 
-routeLine = L.polyline(coords,{
-color:"green",
+if(i==1) color="blue"
+if(i==2) color="gray"
+
+let layer=L.geoJSON(route.geometry,{
+style:{
+color:color,
 weight:6
-}).addTo(map);
+}
+}).addTo(map)
 
-map.fitBounds(routeLine.getBounds());
+routeLayers.push(layer)
+
+})
+
+}
+
+let trafficLayer=L.tileLayer(
+
+"https://{s}.traffic.tomtom.com/traffic/map/4/tile/flow/relative/{z}/{x}/{y}.png?key={{traffic_key}}",
+
+{opacity:0.7}
+
+)
+
+function toggleTraffic(){
+
+if(map.hasLayer(trafficLayer)){
+map.removeLayer(trafficLayer)
+}else{
+map.addLayer(trafficLayer)
+}
 
 }
 

@@ -1,202 +1,104 @@
 import os
 import requests
-import polyline
-import cv2
-from flask import Flask, render_template, request, jsonify
+from flask import Flask,render_template,request,jsonify
 from dotenv import load_dotenv
 from ultralytics import YOLO
 
 load_dotenv()
 
-app = Flask(__name__)
+app=Flask(__name__)
 
-UPLOAD_FOLDER = "static/uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+ORS_KEY=os.getenv("ORS_API_KEY")
+TOMTOM_KEY=os.getenv("TOMTOM_API_KEY")
 
-ORS_API_KEY = os.getenv("ORS_API_KEY")
-TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
-
-# Lazy YOLO model
-model = None
-
-
-def get_model():
-    global model
-    if model is None:
-        print("Loading YOLO model...")
-        model = YOLO("yolov8n.pt")
-    return model
-
-
-# ---------------------------
-# Geocode location
-# ---------------------------
-
-def geocode_location(place):
-    url = f"https://api.openrouteservice.org/geocode/search?api_key={ORS_API_KEY}&text={place}&size=1"
-    res = requests.get(url)
-
-    if res.status_code != 200:
-        return None
-
-    data = res.json()
-
-    if len(data["features"]) == 0:
-        return None
-
-    coords = data["features"][0]["geometry"]["coordinates"]
-    return coords[1], coords[0]
-
-
-# ---------------------------
-# Get route
-# ---------------------------
-
-def get_route(start, end):
-    url = "https://api.openrouteservice.org/v2/directions/driving-car"
-
-    body = {
-        "coordinates": [
-            [start[1], start[0]],
-            [end[1], end[0]]
-        ]
-    }
-
-    headers = {
-        "Authorization": ORS_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    res = requests.post(url, json=body, headers=headers)
-
-    if res.status_code != 200:
-        return None
-
-    data = res.json()
-
-    geometry = data["routes"][0]["geometry"]
-    decoded = polyline.decode(geometry)
-
-    summary = data["routes"][0]["summary"]
-
-    return {
-        "route": decoded,
-        "distance": summary["distance"] / 1000,
-        "duration": summary["duration"] / 60
-    }
-
-
-# ---------------------------
-# Home
-# ---------------------------
+model=YOLO("yolov8n.pt")
 
 @app.route("/")
-def home():
-    return render_template("index.html")
+def index():
 
-
-# ---------------------------
-# Route page
-# ---------------------------
-
-@app.route("/route")
-def route_page():
-    return render_template("dashboard.html")
-
-
-# ---------------------------
-# Hazard page
-# ---------------------------
+    return render_template(
+        "index.html",
+        traffic_key=TOMTOM_KEY
+    )
 
 @app.route("/hazard")
-def hazard_page():
+def hazard():
+
     return render_template("hazard.html")
 
+@app.route("/dashboard")
+def dashboard():
 
-# ---------------------------
-# Route API
-# ---------------------------
+    return render_template("dashboard.html")
 
-@app.route("/get_route", methods=["POST"])
-def route_api():
+@app.route("/route",methods=["POST"])
+def route():
 
-    data = request.json
+    data=request.json
 
-    start_place = data.get("start")
-    end_place = data.get("end")
+    start=data["start"]
+    end=data["end"]
+    mode=data.get("mode","driving-car")
 
-    start = geocode_location(start_place)
-    end = geocode_location(end_place)
+    start_lat,start_lon=map(float,start.split(","))
+    end_lat,end_lon=map(float,end.split(","))
 
-    if not start or not end:
-        return jsonify({"error": "Location not found"})
+    coords=[
+        [start_lon,start_lat],
+        [end_lon,end_lat]
+    ]
 
-    route = get_route(start, end)
+    url=f"https://api.openrouteservice.org/v2/directions/{mode}/geojson"
 
-    if not route:
-        return jsonify({"error": "Route generation failed"})
+    body={
+        "coordinates":coords,
+        "alternative_routes":{
+            "target_count":3,
+            "weight_factor":1.4
+        }
+    }
 
-    return jsonify(route)
+    headers={
+        "Authorization":ORS_KEY,
+        "Content-Type":"application/json"
+    }
 
+    r=requests.post(url,json=body,headers=headers)
 
-# ---------------------------
-# Hazard detection
-# ---------------------------
+    if r.status_code!=200:
+        return jsonify({"error":"route failed"}),500
 
-@app.route("/analyze_video", methods=["POST"])
-def analyze_video():
+    data=r.json()
 
-    file = request.files["video"]
+    routes=[]
 
-    path = os.path.join(UPLOAD_FOLDER, file.filename)
+    for f in data["features"]:
+
+        routes.append({
+
+            "geometry":f["geometry"],
+
+            "distance":f["properties"]["summary"]["distance"],
+
+            "duration":f["properties"]["summary"]["duration"]
+
+        })
+
+    return jsonify({"routes":routes})
+
+@app.route("/detect",methods=["POST"])
+def detect():
+
+    file=request.files["image"]
+
+    path="static/uploads/"+file.filename
+
     file.save(path)
 
-    cap = cv2.VideoCapture(path)
+    results=model(path)
 
-    model = get_model()
+    return "Hazard detection completed"
 
-    hazards = 0
-    frame_count = 0
+if __name__=="__main__":
 
-    while True:
-
-        ret, frame = cap.read()
-
-        if not ret:
-            break
-
-        frame_count += 1
-
-        if frame_count % 5 != 0:
-            continue
-
-        results = model(frame)
-
-        for r in results:
-            for box in r.boxes:
-                hazards += 1
-
-    cap.release()
-
-    risk_score = min(100, hazards // 10)
-
-    if risk_score < 30:
-        status = "Safe Route"
-    elif risk_score < 60:
-        status = "Moderate Risk"
-    else:
-        status = "High Risk Route"
-
-    return jsonify({
-        "hazards": hazards,
-        "risk_score": risk_score,
-        "status": status
-    })
-
-
-# ---------------------------
-# Run server
-# ---------------------------
-
-if __name__ == "__main__":
     app.run(debug=True)
