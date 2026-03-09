@@ -1,30 +1,82 @@
 <!DOCTYPE html>
 <html>
 <head>
-
-<title>Dashboard</title>
-
-<link rel="stylesheet" href="/static/style.css">
-
+    <title>Find My Avenue - Smart Routes</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 </head>
-
 <body>
 
 <div class="navbar">
+    <a href="/">Routes</a>
+    <a href="/hazard">Hazard Detection</a>
 
-<a href="/">Routes</a>
-<a href="/hazard">Hazard Detection</a>
-<a href="/dashboard">Dashboard</a>
+    <input id="startInput" placeholder="Start">
+    <input id="endInput" placeholder="End">
 
+    <button id="myLocationBtn">My Location</button>
+    <button id="routeBtn">Get Route</button>
 </div>
 
-<h2 style="padding:20px">System Dashboard</h2>
+<div id="summaryBar"></div>
+<div id="map"></div>
 
-<p style="padding:20px">
+<script>
 
-Traffic routing + AI hazard detection system.
+var map = L.map('map').setView([28.6, 77.2], 6);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
-</p>
+document.getElementById("myLocationBtn").onclick = function() {
+    navigator.geolocation.getCurrentPosition(function(pos) {
+        document.getElementById("startInput").value =
+            pos.coords.latitude + "," + pos.coords.longitude;
+    });
+};
 
+document.getElementById("routeBtn").onclick = async function() {
+
+    let start = document.getElementById("startInput").value;
+    let end = document.getElementById("endInput").value;
+
+    let res = await fetch("/api/route", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({start, end})
+    });
+
+    let data = await res.json();
+
+    if (!data.routes) return;
+
+    map.eachLayer(layer => {
+        if (layer instanceof L.Polyline) map.removeLayer(layer);
+    });
+
+    let allCoords = [];
+
+    data.routes.forEach((r, i) => {
+
+        let poly = L.polyline(r.coords, {
+            color: i === 0 ? "lime" : "red",
+            weight: 6
+        }).addTo(map);
+
+        allCoords = allCoords.concat(r.coords);
+
+        if (i === 0) {
+            document.getElementById("summaryBar").innerHTML =
+                `Distance: ${r.distance} km |
+                 Duration: ${r.duration} min |
+                 Traffic: ${r.traffic}% |
+                 Hazard: ${r.hazard}% |
+                 Final Risk: ${r.risk}% (Recommended)`;
+        }
+    });
+
+    map.fitBounds(L.latLngBounds(allCoords));
+};
+
+</script>
 </body>
 </html>

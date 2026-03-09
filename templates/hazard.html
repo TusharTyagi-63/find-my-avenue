@@ -1,10 +1,48 @@
 <!DOCTYPE html>
 <html>
-<head>
 
+<head>
 <title>Hazard Detection</title>
 
-<link rel="stylesheet" href="/static/style.css">
+<style>
+
+body{
+font-family:Arial;
+background:#0b1a2f;
+color:white;
+text-align:center;
+}
+
+.navbar{
+background:#16273f;
+padding:10px;
+}
+
+.navbar a{
+color:#8fd0ff;
+text-decoration:none;
+font-weight:bold;
+margin-right:20px;
+}
+
+.container{
+margin-top:40px;
+}
+
+button{
+padding:10px 20px;
+background:#2e6bff;
+border:none;
+color:white;
+border-radius:6px;
+cursor:pointer;
+}
+
+input{
+padding:10px;
+}
+
+</style>
 
 </head>
 
@@ -14,19 +52,53 @@
 
 <a href="/">Routes</a>
 <a href="/hazard">Hazard Detection</a>
-<a href="/dashboard">Dashboard</a>
 
 </div>
 
-<h2 style="padding:20px">Upload Road Image</h2>
 
-<form action="/detect" method="post" enctype="multipart/form-data" style="padding:20px">
+<div class="container">
 
-<input type="file" name="image">
+<h2>Upload Road Video</h2>
 
-<button type="submit">Detect Hazard</button>
+<form id="uploadForm">
+
+<input type="file" name="video" required>
+
+<br><br>
+
+<button type="submit">Analyze</button>
 
 </form>
+
+<br>
+
+<div id="result"></div>
+
+</div>
+
+<script>
+
+document.getElementById("uploadForm").onsubmit = async function(e){
+
+e.preventDefault();
+
+let form=new FormData(this);
+
+let res = await fetch("/analyze_video",{
+method:"POST",
+body:form
+});
+
+let data = await res.json();
+
+document.getElementById("result").innerHTML =
+"Detected Hazards: "+data.hazards+
+"<br>Risk Score: "+data.risk_score+
+"<br>Status: "+data.status;
+
+}
+
+</script>
 
 </body>
 </html>
