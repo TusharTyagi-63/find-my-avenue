@@ -2,47 +2,9 @@
 <html>
 
 <head>
+
 <title>Hazard Detection</title>
-
-<style>
-
-body{
-font-family:Arial;
-background:#0b1a2f;
-color:white;
-text-align:center;
-}
-
-.navbar{
-background:#16273f;
-padding:10px;
-}
-
-.navbar a{
-color:#8fd0ff;
-text-decoration:none;
-font-weight:bold;
-margin-right:20px;
-}
-
-.container{
-margin-top:40px;
-}
-
-button{
-padding:10px 20px;
-background:#2e6bff;
-border:none;
-color:white;
-border-radius:6px;
-cursor:pointer;
-}
-
-input{
-padding:10px;
-}
-
-</style>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 
 </head>
 
@@ -55,8 +17,7 @@ padding:10px;
 
 </div>
 
-
-<div class="container">
+<div style="text-align:center;margin-top:40px;">
 
 <h2>Upload Road Video</h2>
 

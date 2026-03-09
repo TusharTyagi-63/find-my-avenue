@@ -14,25 +14,43 @@ UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 ORS_API_KEY = os.getenv("ORS_API_KEY")
-TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
 
-# Lazy YOLO model
 model = None
 
 
+# ---------------------------
+# Lazy load YOLO model
+# ---------------------------
 def get_model():
     global model
     if model is None:
-        print("Loading YOLO model...")
+        print("Loading YOLOv8 model...")
         model = YOLO("yolov8n.pt")
     return model
 
 
 # ---------------------------
-# Geocode location
+# Parse location
 # ---------------------------
+def parse_location(text):
+    """
+    Accepts:
+    - '28.6,77.2'
+    - 'Delhi'
+    """
 
+    if "," in text:
+        lat, lon = text.split(",")
+        return float(lat), float(lon)
+
+    return geocode_location(text)
+
+
+# ---------------------------
+# Geocode
+# ---------------------------
 def geocode_location(place):
+
     url = f"https://api.openrouteservice.org/geocode/search?api_key={ORS_API_KEY}&text={place}&size=1"
     res = requests.get(url)
 
@@ -45,14 +63,15 @@ def geocode_location(place):
         return None
 
     coords = data["features"][0]["geometry"]["coordinates"]
+
     return coords[1], coords[0]
 
 
 # ---------------------------
-# Get route
+# Route
 # ---------------------------
-
 def get_route(start, end):
+
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
 
     body = {
@@ -80,14 +99,14 @@ def get_route(start, end):
     summary = data["routes"][0]["summary"]
 
     return {
-        "route": decoded,
-        "distance": summary["distance"] / 1000,
-        "duration": summary["duration"] / 60
+        "coords": decoded,
+        "distance": round(summary["distance"] / 1000, 2),
+        "duration": round(summary["duration"] / 60, 2)
     }
 
 
 # ---------------------------
-# Home
+# Pages
 # ---------------------------
 
 @app.route("/")
@@ -95,21 +114,8 @@ def home():
     return render_template("index.html")
 
 
-# ---------------------------
-# Route page
-# ---------------------------
-
-@app.route("/route")
-def route_page():
-    return render_template("dashboard.html")
-
-
-# ---------------------------
-# Hazard page
-# ---------------------------
-
 @app.route("/hazard")
-def hazard_page():
+def hazard():
     return render_template("hazard.html")
 
 
@@ -117,16 +123,16 @@ def hazard_page():
 # Route API
 # ---------------------------
 
-@app.route("/get_route", methods=["POST"])
+@app.route("/api/route", methods=["POST"])
 def route_api():
 
     data = request.json
 
-    start_place = data.get("start")
-    end_place = data.get("end")
+    start_text = data.get("start")
+    end_text = data.get("end")
 
-    start = geocode_location(start_place)
-    end = geocode_location(end_place)
+    start = parse_location(start_text)
+    end = parse_location(end_text)
 
     if not start or not end:
         return jsonify({"error": "Location not found"})
@@ -158,6 +164,8 @@ def analyze_video():
     hazards = 0
     frame_count = 0
 
+    hazard_classes = ["car", "truck", "bus", "motorcycle"]
+
     while True:
 
         ret, frame = cap.read()
@@ -174,11 +182,16 @@ def analyze_video():
 
         for r in results:
             for box in r.boxes:
-                hazards += 1
+
+                cls = int(box.cls[0])
+                label = model.names[cls]
+
+                if label in hazard_classes:
+                    hazards += 1
 
     cap.release()
 
-    risk_score = min(100, hazards // 10)
+    risk_score = min(100, hazards * 2)
 
     if risk_score < 30:
         status = "Safe Route"

@@ -1,52 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Find My Avenue - Smart Routes</title>
+<title>Find My Avenue</title>
 
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
 
-<style>
-body{
-margin:0;
-font-family:Arial;
-background:#0b1a2f;
-}
-
-.navbar{
-background:#16273f;
-padding:10px;
-display:flex;
-align-items:center;
-gap:10px;
-}
-
-.navbar a{
-color:#8fd0ff;
-text-decoration:none;
-font-weight:bold;
-margin-right:10px;
-}
-
-input,select{
-padding:8px;
-border-radius:5px;
-border:none;
-}
-
-button{
-padding:8px 14px;
-background:#2e6bff;
-color:white;
-border:none;
-border-radius:6px;
-cursor:pointer;
-}
-
-#map{
-height:85vh;
-width:100%;
-}
-</style>
 </head>
 
 <body>
@@ -59,33 +18,25 @@ width:100%;
 <input id="start" placeholder="Start">
 <input id="end" placeholder="End">
 
-<select>
-<option>Driving</option>
-</select>
-
 <button onclick="getLocation()">My Location</button>
 <button onclick="getRoute()">Get Route</button>
 
-<label style="color:white;">
-<input type="checkbox" checked> Traffic
-</label>
-
 </div>
 
+<div id="summaryBar"></div>
 <div id="map"></div>
 
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
 <script>
 
-var map = L.map('map').setView([28.67,77.21],7);
+var map = L.map('map').setView([28.6,77.2],6);
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
 attribution:'© OpenStreetMap'
 }).addTo(map);
 
 var routeLine;
-
 
 function getLocation(){
 
@@ -103,13 +54,12 @@ L.marker([lat,lon]).addTo(map);
 });
 }
 
-
 async function getRoute(){
 
 let start=document.getElementById("start").value;
 let end=document.getElementById("end").value;
 
-let res = await fetch("/get_route",{
+let res = await fetch("/api/route",{
 method:"POST",
 headers:{"Content-Type":"application/json"},
 body:JSON.stringify({start:start,end:end})
@@ -117,21 +67,24 @@ body:JSON.stringify({start:start,end:end})
 
 let data = await res.json();
 
-if(!data.route){
+if(!data.coords){
 alert("Route failed");
 return;
 }
 
-let coords=data.route.map(p=>[p[0],p[1]]);
+let coords=data.coords.map(p=>[p[0],p[1]]);
 
 if(routeLine) map.removeLayer(routeLine);
 
 routeLine = L.polyline(coords,{
-color:"green",
+color:"lime",
 weight:6
 }).addTo(map);
 
 map.fitBounds(routeLine.getBounds());
+
+document.getElementById("summaryBar").innerHTML =
+"Distance: "+data.distance+" km | Duration: "+data.duration+" min";
 
 }
 
