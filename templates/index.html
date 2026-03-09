@@ -1,100 +1,139 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Find My Avenue</title>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Find My Avenue - Smart Routes</title>
 
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+<style>
+body{
+margin:0;
+font-family:Arial;
+background:#0b1a2f;
+}
+
+.navbar{
+background:#16273f;
+padding:10px;
+display:flex;
+align-items:center;
+gap:10px;
+}
+
+.navbar a{
+color:#8fd0ff;
+text-decoration:none;
+font-weight:bold;
+margin-right:10px;
+}
+
+input,select{
+padding:8px;
+border-radius:5px;
+border:none;
+}
+
+button{
+padding:8px 14px;
+background:#2e6bff;
+color:white;
+border:none;
+border-radius:6px;
+cursor:pointer;
+}
+
+#map{
+height:85vh;
+width:100%;
+}
+</style>
 </head>
 
 <body>
 
 <div class="navbar">
-    <input id="startInput" placeholder="Start Location">
-    <input id="endInput" placeholder="End Location">
 
-    <select id="modeSelect">
-        <option>Driving</option>
-    </select>
+<a href="/">Routes</a>
+<a href="/hazard">Hazard Detection</a>
 
-    <button id="myLocationBtn">My Location</button>
-    <button id="getRouteBtn">Get Route</button>
+<input id="start" placeholder="Start">
+<input id="end" placeholder="End">
 
-    <label>
-        <input type="checkbox" id="trafficToggle"> Traffic
-    </label>
+<select>
+<option>Driving</option>
+</select>
+
+<button onclick="getLocation()">My Location</button>
+<button onclick="getRoute()">Get Route</button>
+
+<label style="color:white;">
+<input type="checkbox" checked> Traffic
+</label>
+
 </div>
 
-<div id="summaryBar"></div>
 <div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
 <script>
 
-var map = L.map('map').setView([28.6, 77.2], 6);
+var map = L.map('map').setView([28.67,77.21],7);
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap contributors'
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+attribution:'© OpenStreetMap'
 }).addTo(map);
 
-var trafficLayer = L.tileLayer(
-    "https://{s}.tile.opentrafficmap.org/traffic/{z}/{x}/{y}.png"
-);
+var routeLine;
 
-document.getElementById("trafficToggle").onchange = function() {
-    if (this.checked) map.addLayer(trafficLayer);
-    else map.removeLayer(trafficLayer);
-};
 
-document.getElementById("myLocationBtn").onclick = function() {
-    navigator.geolocation.getCurrentPosition(function(pos) {
-        document.getElementById("startInput").value =
-            pos.coords.latitude + "," + pos.coords.longitude;
-    });
-};
+function getLocation(){
 
-document.getElementById("getRouteBtn").onclick = async function() {
+navigator.geolocation.getCurrentPosition(function(pos){
 
-    let start = document.getElementById("startInput").value;
-    let end = document.getElementById("endInput").value;
+var lat=pos.coords.latitude;
+var lon=pos.coords.longitude;
 
-    let response = await fetch("/api/route", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({start: start, end: end})
-    });
+document.getElementById("start").value = lat+","+lon;
 
-    let data = await response.json();
+map.setView([lat,lon],12);
 
-    if (!data.routes) return;
+L.marker([lat,lon]).addTo(map);
 
-    map.eachLayer(function(layer) {
-        if (layer instanceof L.Polyline) map.removeLayer(layer);
-    });
+});
+}
 
-    let allCoords = [];
 
-    data.routes.forEach((route, index) => {
+async function getRoute(){
 
-        let color = index === 0 ? "lime" : "red";
+let start=document.getElementById("start").value;
+let end=document.getElementById("end").value;
 
-        let poly = L.polyline(route.coords, {
-            color: color,
-            weight: 6
-        }).addTo(map);
+let res = await fetch("/get_route",{
+method:"POST",
+headers:{"Content-Type":"application/json"},
+body:JSON.stringify({start:start,end:end})
+});
 
-        allCoords = allCoords.concat(route.coords);
+let data = await res.json();
 
-        if (index === 0) {
-            document.getElementById("summaryBar").innerHTML =
-                `Distance: ${route.distance} km | Duration: ${route.duration} min | Risk: ${route.risk}% (Recommended)`;
-        }
-    });
+if(!data.route){
+alert("Route failed");
+return;
+}
 
-    map.fitBounds(L.latLngBounds(allCoords));
-};
+let coords=data.route.map(p=>[p[0],p[1]]);
+
+if(routeLine) map.removeLayer(routeLine);
+
+routeLine = L.polyline(coords,{
+color:"green",
+weight:6
+}).addTo(map);
+
+map.fitBounds(routeLine.getBounds());
+
+}
 
 </script>
 
