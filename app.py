@@ -6,6 +6,7 @@ from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from ultralytics import YOLO
 
+# load environment variables
 load_dotenv()
 
 app = Flask(__name__)
@@ -15,60 +16,66 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 ORS_API_KEY = os.getenv("ORS_API_KEY")
 
+# global model variable
 model = None
 
 
 # ---------------------------
-# Lazy load YOLO
+# Lazy load YOLO model
 # ---------------------------
-
 def get_model():
     global model
     if model is None:
         print("Loading YOLOv8 model...")
-        model = YOLO("yolov8n")
+        model = YOLO("yolov8n")   # automatic download
     return model
 
 
 # ---------------------------
-# Parse location
+# Parse location input
 # ---------------------------
-
 def parse_location(text):
 
-    if "," in text:
-        lat, lon = text.split(",")
-        return float(lat), float(lon)
+    if not text:
+        return None
 
+    # coordinate format
+    if "," in text:
+        try:
+            lat, lon = text.split(",")
+            return float(lat), float(lon)
+        except:
+            return None
+
+    # place name
     return geocode_location(text)
 
 
 # ---------------------------
-# Geocode
+# Geocode location
 # ---------------------------
-
 def geocode_location(place):
 
     url = f"https://api.openrouteservice.org/geocode/search?api_key={ORS_API_KEY}&text={place}&size=1"
-    res = requests.get(url)
 
-    if res.status_code != 200:
+    try:
+        res = requests.get(url)
+        data = res.json()
+
+        if len(data["features"]) == 0:
+            return None
+
+        coords = data["features"][0]["geometry"]["coordinates"]
+
+        return coords[1], coords[0]
+
+    except:
         return None
-
-    data = res.json()
-
-    if len(data["features"]) == 0:
-        return None
-
-    coords = data["features"][0]["geometry"]["coordinates"]
-
-    return coords[1], coords[0]
 
 
 # ---------------------------
-# Route
+# Get route
 # ---------------------------
-
 def get_route(start, end):
 
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
@@ -85,23 +92,28 @@ def get_route(start, end):
         "Content-Type": "application/json"
     }
 
-    res = requests.post(url, json=body, headers=headers)
+    try:
 
-    if res.status_code != 200:
+        res = requests.post(url, json=body, headers=headers)
+
+        if res.status_code != 200:
+            return None
+
+        data = res.json()
+
+        geometry = data["routes"][0]["geometry"]
+        decoded = polyline.decode(geometry)
+
+        summary = data["routes"][0]["summary"]
+
+        return {
+            "coords": decoded,
+            "distance": round(summary["distance"] / 1000, 2),
+            "duration": round(summary["duration"] / 60, 2)
+        }
+
+    except:
         return None
-
-    data = res.json()
-
-    geometry = data["routes"][0]["geometry"]
-    decoded = polyline.decode(geometry)
-
-    summary = data["routes"][0]["summary"]
-
-    return {
-        "coords": decoded,
-        "distance": round(summary["distance"] / 1000, 2),
-        "duration": round(summary["duration"] / 60, 2)
-    }
 
 
 # ---------------------------
@@ -132,13 +144,19 @@ def route_api():
 
     data = request.json
 
-    start = parse_location(data.get("start"))
-    end = parse_location(data.get("end"))
+    start_text = data.get("start")
+    end_text = data.get("end")
+
+    start = parse_location(start_text)
+    end = parse_location(end_text)
 
     if not start or not end:
         return jsonify({"error": "Location not found"})
 
     route = get_route(start, end)
+
+    if not route:
+        return jsonify({"error": "Route generation failed"})
 
     return jsonify(route)
 
@@ -149,6 +167,9 @@ def route_api():
 
 @app.route("/analyze_video", methods=["POST"])
 def analyze_video():
+
+    if "video" not in request.files:
+        return jsonify({"error": "No video uploaded"})
 
     file = request.files["video"]
 
@@ -173,6 +194,7 @@ def analyze_video():
 
         frame_count += 1
 
+        # analyze every 10th frame for speed
         if frame_count % 10 != 0:
             continue
 
@@ -204,6 +226,10 @@ def analyze_video():
         "status": status
     })
 
+
+# ---------------------------
+# Run server
+# ---------------------------
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
