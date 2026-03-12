@@ -1,82 +1,96 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Find My Avenue - Smart Routes</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<title>Find My Avenue Dashboard</title>
+
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
 </head>
+
 <body>
 
 <div class="navbar">
-    <a href="/">Routes</a>
-    <a href="/hazard">Hazard Detection</a>
 
-    <input id="startInput" placeholder="Start">
-    <input id="endInput" placeholder="End">
+<a href="/">Home</a>
+<a href="/dashboard">Routes</a>
+<a href="/hazard">Hazard Detection</a>
 
-    <button id="myLocationBtn">My Location</button>
-    <button id="routeBtn">Get Route</button>
+<input id="start" placeholder="Start">
+<input id="end" placeholder="End">
+
+<button onclick="getLocation()">My Location</button>
+<button onclick="getRoute()">Get Route</button>
+
 </div>
 
 <div id="summaryBar"></div>
 <div id="map"></div>
 
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
 <script>
 
-var map = L.map('map').setView([28.6, 77.2], 6);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+var map = L.map('map').setView([28.6,77.2],6);
 
-document.getElementById("myLocationBtn").onclick = function() {
-    navigator.geolocation.getCurrentPosition(function(pos) {
-        document.getElementById("startInput").value =
-            pos.coords.latitude + "," + pos.coords.longitude;
-    });
-};
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+attribution:'© OpenStreetMap'
+}).addTo(map);
 
-document.getElementById("routeBtn").onclick = async function() {
+var routeLine;
 
-    let start = document.getElementById("startInput").value;
-    let end = document.getElementById("endInput").value;
+function getLocation(){
 
-    let res = await fetch("/api/route", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({start, end})
-    });
+navigator.geolocation.getCurrentPosition(function(pos){
 
-    let data = await res.json();
+var lat=pos.coords.latitude;
+var lon=pos.coords.longitude;
 
-    if (!data.routes) return;
+document.getElementById("start").value = lat+","+lon;
 
-    map.eachLayer(layer => {
-        if (layer instanceof L.Polyline) map.removeLayer(layer);
-    });
+map.setView([lat,lon],12);
 
-    let allCoords = [];
+L.marker([lat,lon]).addTo(map);
 
-    data.routes.forEach((r, i) => {
+});
+}
 
-        let poly = L.polyline(r.coords, {
-            color: i === 0 ? "lime" : "red",
-            weight: 6
-        }).addTo(map);
+async function getRoute(){
 
-        allCoords = allCoords.concat(r.coords);
+let start=document.getElementById("start").value;
+let end=document.getElementById("end").value;
 
-        if (i === 0) {
-            document.getElementById("summaryBar").innerHTML =
-                `Distance: ${r.distance} km |
-                 Duration: ${r.duration} min |
-                 Traffic: ${r.traffic}% |
-                 Hazard: ${r.hazard}% |
-                 Final Risk: ${r.risk}% (Recommended)`;
-        }
-    });
+let res = await fetch("/api/route",{
+method:"POST",
+headers:{"Content-Type":"application/json"},
+body:JSON.stringify({start:start,end:end})
+});
 
-    map.fitBounds(L.latLngBounds(allCoords));
-};
+let data = await res.json();
+
+if(!data.coords){
+alert("Route failed");
+return;
+}
+
+let coords=data.coords.map(p=>[p[0],p[1]]);
+
+if(routeLine) map.removeLayer(routeLine);
+
+routeLine = L.polyline(coords,{
+color:"lime",
+weight:6
+}).addTo(map);
+
+map.fitBounds(routeLine.getBounds());
+
+document.getElementById("summaryBar").innerHTML =
+"Distance: "+data.distance+" km | Duration: "+data.duration+" min";
+
+}
 
 </script>
+
 </body>
 </html>

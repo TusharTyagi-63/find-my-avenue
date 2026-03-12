@@ -19,25 +19,22 @@ model = None
 
 
 # ---------------------------
-# Lazy load YOLO model
+# Lazy load YOLO
 # ---------------------------
+
 def get_model():
     global model
     if model is None:
         print("Loading YOLOv8 model...")
-        model = YOLO("yolov8n.pt")
+        model = YOLO("yolov8n")
     return model
 
 
 # ---------------------------
 # Parse location
 # ---------------------------
+
 def parse_location(text):
-    """
-    Accepts:
-    - '28.6,77.2'
-    - 'Delhi'
-    """
 
     if "," in text:
         lat, lon = text.split(",")
@@ -49,6 +46,7 @@ def parse_location(text):
 # ---------------------------
 # Geocode
 # ---------------------------
+
 def geocode_location(place):
 
     url = f"https://api.openrouteservice.org/geocode/search?api_key={ORS_API_KEY}&text={place}&size=1"
@@ -70,6 +68,7 @@ def geocode_location(place):
 # ---------------------------
 # Route
 # ---------------------------
+
 def get_route(start, end):
 
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
@@ -114,6 +113,11 @@ def home():
     return render_template("index.html")
 
 
+@app.route("/dashboard")
+def dashboard():
+    return render_template("dashboard.html")
+
+
 @app.route("/hazard")
 def hazard():
     return render_template("hazard.html")
@@ -128,19 +132,13 @@ def route_api():
 
     data = request.json
 
-    start_text = data.get("start")
-    end_text = data.get("end")
-
-    start = parse_location(start_text)
-    end = parse_location(end_text)
+    start = parse_location(data.get("start"))
+    end = parse_location(data.get("end"))
 
     if not start or not end:
         return jsonify({"error": "Location not found"})
 
     route = get_route(start, end)
-
-    if not route:
-        return jsonify({"error": "Route generation failed"})
 
     return jsonify(route)
 
@@ -164,7 +162,7 @@ def analyze_video():
     hazards = 0
     frame_count = 0
 
-    hazard_classes = ["car", "truck", "bus", "motorcycle"]
+    vehicle_classes = ["car", "truck", "bus", "motorcycle"]
 
     while True:
 
@@ -175,7 +173,7 @@ def analyze_video():
 
         frame_count += 1
 
-        if frame_count % 5 != 0:
+        if frame_count % 10 != 0:
             continue
 
         results = model(frame)
@@ -186,7 +184,7 @@ def analyze_video():
                 cls = int(box.cls[0])
                 label = model.names[cls]
 
-                if label in hazard_classes:
+                if label in vehicle_classes:
                     hazards += 1
 
     cap.release()
@@ -207,9 +205,5 @@ def analyze_video():
     })
 
 
-# ---------------------------
-# Run server
-# ---------------------------
-
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000)

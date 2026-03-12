@@ -2,93 +2,23 @@
 <html>
 <head>
 <title>Find My Avenue</title>
-
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
-
 </head>
 
-<body>
+<body style="text-align:center;padding-top:100px;">
 
-<div class="navbar">
+<h1>Find My Avenue</h1>
+<p>AI Powered Smart Navigation</p>
 
-<a href="/">Routes</a>
-<a href="/hazard">Hazard Detection</a>
+<br>
 
-<input id="start" placeholder="Start">
-<input id="end" placeholder="End">
+<a href="/dashboard">
+<button>Open Dashboard</button>
+</a>
 
-<button onclick="getLocation()">My Location</button>
-<button onclick="getRoute()">Get Route</button>
-
-</div>
-
-<div id="summaryBar"></div>
-<div id="map"></div>
-
-<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-
-<script>
-
-var map = L.map('map').setView([28.6,77.2],6);
-
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-attribution:'© OpenStreetMap'
-}).addTo(map);
-
-var routeLine;
-
-function getLocation(){
-
-navigator.geolocation.getCurrentPosition(function(pos){
-
-var lat=pos.coords.latitude;
-var lon=pos.coords.longitude;
-
-document.getElementById("start").value = lat+","+lon;
-
-map.setView([lat,lon],12);
-
-L.marker([lat,lon]).addTo(map);
-
-});
-}
-
-async function getRoute(){
-
-let start=document.getElementById("start").value;
-let end=document.getElementById("end").value;
-
-let res = await fetch("/api/route",{
-method:"POST",
-headers:{"Content-Type":"application/json"},
-body:JSON.stringify({start:start,end:end})
-});
-
-let data = await res.json();
-
-if(!data.coords){
-alert("Route failed");
-return;
-}
-
-let coords=data.coords.map(p=>[p[0],p[1]]);
-
-if(routeLine) map.removeLayer(routeLine);
-
-routeLine = L.polyline(coords,{
-color:"lime",
-weight:6
-}).addTo(map);
-
-map.fitBounds(routeLine.getBounds());
-
-document.getElementById("summaryBar").innerHTML =
-"Distance: "+data.distance+" km | Duration: "+data.duration+" min";
-
-}
-
-</script>
+<a href="/hazard">
+<button>Hazard Detection</button>
+</a>
 
 </body>
 </html>
