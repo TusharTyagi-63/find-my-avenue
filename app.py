@@ -49,7 +49,7 @@ def geocode_location(place):
         if len(data["features"]) == 0:
             return None
 
-        coords = data["features"][0]["geometry"]["coordinates]
+        coords = data["features"][0]["geometry"]["coordinates"]
 
         return coords[1], coords[0]
 
