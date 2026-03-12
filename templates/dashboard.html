@@ -22,6 +22,7 @@
 
 <button onclick="getLocation()">My Location</button>
 <button onclick="getRoute()">Get Route</button>
+<button onclick="showTraffic()">Traffic Heatmap</button>
 
 </div>
 
@@ -29,16 +30,17 @@
 <div id="map"></div>
 
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
 
 <script>
 
 var map = L.map('map').setView([28.6,77.2],6);
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-attribution:'© OpenStreetMap'
-}).addTo(map);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
-var routeLine;
+var lines=[];
+var safestCoords=[];
+var heatLayer=null;
 
 function getLocation(){
 
@@ -56,6 +58,7 @@ L.marker([lat,lon]).addTo(map);
 });
 }
 
+
 async function getRoute(){
 
 let start=document.getElementById("start").value;
@@ -69,24 +72,62 @@ body:JSON.stringify({start:start,end:end})
 
 let data = await res.json();
 
-if(!data.coords){
-alert("Route failed");
-return;
+lines.forEach(l=>map.removeLayer(l));
+lines=[];
+
+let summary="";
+
+data.routes.forEach((r,i)=>{
+
+let color="red";
+
+if(i===0){
+color="lime";
+safestCoords=r.coords;
 }
 
-let coords=data.coords.map(p=>[p[0],p[1]]);
+if(i===1) color="yellow";
 
-if(routeLine) map.removeLayer(routeLine);
-
-routeLine = L.polyline(coords,{
-color:"lime",
+let poly=L.polyline(r.coords,{
+color:color,
 weight:6
 }).addTo(map);
 
-map.fitBounds(routeLine.getBounds());
+lines.push(poly);
 
-document.getElementById("summaryBar").innerHTML =
-"Distance: "+data.distance+" km | Duration: "+data.duration+" min";
+summary += `Route ${i+1} → Distance ${r.distance} km | Duration ${r.duration} min | Traffic ${r.traffic}% <br>`;
+
+});
+
+map.fitBounds(lines[0].getBounds());
+
+document.getElementById("summaryBar").innerHTML = summary;
+
+}
+
+
+async function showTraffic(){
+
+if(safestCoords.length===0){
+alert("Generate route first");
+return;
+}
+
+let res = await fetch("/api/traffic_heatmap",{
+method:"POST",
+headers:{"Content-Type":"application/json"},
+body:JSON.stringify({coords:safestCoords})
+});
+
+let data = await res.json();
+
+if(heatLayer) map.removeLayer(heatLayer);
+
+heatLayer=L.heatLayer(data.heat,{
+radius:25,
+blur:20,
+maxZoom:10
+}).addTo(map);
 
 }
 

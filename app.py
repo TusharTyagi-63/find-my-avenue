@@ -6,7 +6,6 @@ from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from ultralytics import YOLO
 
-# load environment variables
 load_dotenv()
 
 app = Flask(__name__)
@@ -15,45 +14,30 @@ UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 ORS_API_KEY = os.getenv("ORS_API_KEY")
+TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
 
-# global model variable
 model = None
 
 
-# ---------------------------
-# Lazy load YOLO model
-# ---------------------------
 def get_model():
     global model
     if model is None:
-        print("Loading YOLOv8 model...")
-        model = YOLO("yolov8n")   # automatic download
+        print("Loading YOLO model...")
+        model = YOLO("yolov8n")
     return model
 
 
-# ---------------------------
-# Parse location input
-# ---------------------------
 def parse_location(text):
-
     if not text:
         return None
 
-    # coordinate format
     if "," in text:
-        try:
-            lat, lon = text.split(",")
-            return float(lat), float(lon)
-        except:
-            return None
+        lat, lon = text.split(",")
+        return float(lat), float(lon)
 
-    # place name
     return geocode_location(text)
 
 
-# ---------------------------
-# Geocode location
-# ---------------------------
 def geocode_location(place):
 
     url = f"https://api.openrouteservice.org/geocode/search?api_key={ORS_API_KEY}&text={place}&size=1"
@@ -65,7 +49,7 @@ def geocode_location(place):
         if len(data["features"]) == 0:
             return None
 
-        coords = data["features"][0]["geometry"]["coordinates"]
+        coords = data["features"][0]["geometry"]["coordinates]
 
         return coords[1], coords[0]
 
@@ -73,10 +57,26 @@ def geocode_location(place):
         return None
 
 
-# ---------------------------
-# Get route
-# ---------------------------
-def get_route(start, end):
+def get_traffic(lat, lon):
+
+    try:
+        url = f"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point={lat},{lon}&key={TOMTOM_API_KEY}"
+
+        res = requests.get(url)
+        data = res.json()
+
+        current = data["flowSegmentData"]["currentSpeed"]
+        free = data["flowSegmentData"]["freeFlowSpeed"]
+
+        congestion = int((1 - current/free) * 100)
+
+        return max(congestion, 0)
+
+    except:
+        return 0
+
+
+def get_routes(start, end):
 
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
 
@@ -84,7 +84,11 @@ def get_route(start, end):
         "coordinates": [
             [start[1], start[0]],
             [end[1], end[0]]
-        ]
+        ],
+        "alternative_routes": {
+            "target_count": 3,
+            "share_factor": 0.6
+        }
     }
 
     headers = {
@@ -92,33 +96,38 @@ def get_route(start, end):
         "Content-Type": "application/json"
     }
 
-    try:
+    res = requests.post(url, json=body, headers=headers)
 
-        res = requests.post(url, json=body, headers=headers)
-
-        if res.status_code != 200:
-            return None
-
-        data = res.json()
-
-        geometry = data["routes"][0]["geometry"]
-        decoded = polyline.decode(geometry)
-
-        summary = data["routes"][0]["summary"]
-
-        return {
-            "coords": decoded,
-            "distance": round(summary["distance"] / 1000, 2),
-            "duration": round(summary["duration"] / 60, 2)
-        }
-
-    except:
+    if res.status_code != 200:
         return None
 
+    data = res.json()
 
-# ---------------------------
-# Pages
-# ---------------------------
+    routes = []
+
+    for r in data["routes"]:
+
+        geometry = r["geometry"]
+        decoded = polyline.decode(geometry)
+
+        summary = r["summary"]
+
+        lat, lon = decoded[len(decoded)//2]
+
+        traffic = get_traffic(lat, lon)
+
+        routes.append({
+            "coords": decoded,
+            "distance": round(summary["distance"]/1000, 2),
+            "duration": round(summary["duration"]/60, 2),
+            "traffic": traffic,
+            "risk": traffic
+        })
+
+    routes = sorted(routes, key=lambda x: x["risk"])
+
+    return routes
+
 
 @app.route("/")
 def home():
@@ -135,41 +144,52 @@ def hazard():
     return render_template("hazard.html")
 
 
-# ---------------------------
-# Route API
-# ---------------------------
-
 @app.route("/api/route", methods=["POST"])
 def route_api():
 
     data = request.json
 
-    start_text = data.get("start")
-    end_text = data.get("end")
-
-    start = parse_location(start_text)
-    end = parse_location(end_text)
+    start = parse_location(data.get("start"))
+    end = parse_location(data.get("end"))
 
     if not start or not end:
         return jsonify({"error": "Location not found"})
 
-    route = get_route(start, end)
+    routes = get_routes(start, end)
 
-    if not route:
-        return jsonify({"error": "Route generation failed"})
-
-    return jsonify(route)
+    return jsonify({"routes": routes})
 
 
-# ---------------------------
+# --------------------------
+# TRAFFIC HEATMAP API
+# --------------------------
+
+@app.route("/api/traffic_heatmap", methods=["POST"])
+def traffic_heatmap():
+
+    coords = request.json["coords"]
+
+    heat_points = []
+
+    # sample route every ~15 points
+    for i in range(0, len(coords), 15):
+
+        lat = coords[i][0]
+        lon = coords[i][1]
+
+        traffic = get_traffic(lat, lon)
+
+        heat_points.append([lat, lon, traffic/100])
+
+    return jsonify({"heat": heat_points})
+
+
+# --------------------------
 # Hazard detection
-# ---------------------------
+# --------------------------
 
 @app.route("/analyze_video", methods=["POST"])
 def analyze_video():
-
-    if "video" not in request.files:
-        return jsonify({"error": "No video uploaded"})
 
     file = request.files["video"]
 
@@ -183,7 +203,7 @@ def analyze_video():
     hazards = 0
     frame_count = 0
 
-    vehicle_classes = ["car", "truck", "bus", "motorcycle"]
+    vehicle_classes = ["car","truck","bus","motorcycle"]
 
     while True:
 
@@ -194,7 +214,6 @@ def analyze_video():
 
         frame_count += 1
 
-        # analyze every 10th frame for speed
         if frame_count % 10 != 0:
             continue
 
@@ -226,10 +245,6 @@ def analyze_video():
         "status": status
     })
 
-
-# ---------------------------
-# Run server
-# ---------------------------
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
