@@ -19,14 +19,20 @@ TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
 model = None
 
 
+# --------------------------
+# Load YOLO Model (Lazy)
+# --------------------------
 def get_model():
     global model
     if model is None:
         print("Loading YOLO model...")
-        model = YOLO("yolov8n")
+        model = YOLO("yolov8n.pt")
     return model
 
 
+# --------------------------
+# Parse Location Input
+# --------------------------
 def parse_location(text):
     if not text:
         return None
@@ -38,6 +44,9 @@ def parse_location(text):
     return geocode_location(text)
 
 
+# --------------------------
+# Geocode using ORS
+# --------------------------
 def geocode_location(place):
 
     url = f"https://api.openrouteservice.org/geocode/search?api_key={ORS_API_KEY}&text={place}&size=1"
@@ -57,6 +66,9 @@ def geocode_location(place):
         return None
 
 
+# --------------------------
+# Traffic Data (TomTom)
+# --------------------------
 def get_traffic(lat, lon):
 
     try:
@@ -68,14 +80,17 @@ def get_traffic(lat, lon):
         current = data["flowSegmentData"]["currentSpeed"]
         free = data["flowSegmentData"]["freeFlowSpeed"]
 
-        congestion = int((1 - current/free) * 100)
+        congestion = max(0, min(100, int((1 - current / free) * 100)))
 
-        return max(congestion, 0)
+        return congestion
 
     except:
         return 0
 
 
+# --------------------------
+# Route Generation
+# --------------------------
 def get_routes(start, end):
 
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
@@ -112,16 +127,24 @@ def get_routes(start, end):
 
         summary = r["summary"]
 
-        lat, lon = decoded[len(decoded)//2]
+        lat, lon = decoded[len(decoded) // 2]
 
         traffic = get_traffic(lat, lon)
 
+        distance_km = summary["distance"] / 1000
+        duration_min = summary["duration"] / 60
+
+        distance_score = distance_km
+        traffic_score = traffic
+
+        risk = (0.7 * traffic_score) + (0.3 * distance_score)
+
         routes.append({
             "coords": decoded,
-            "distance": round(summary["distance"]/1000, 2),
-            "duration": round(summary["duration"]/60, 2),
+            "distance": round(distance_km, 2),
+            "duration": round(duration_min, 2),
             "traffic": traffic,
-            "risk": traffic
+            "risk": round(risk, 2)
         })
 
     routes = sorted(routes, key=lambda x: x["risk"])
@@ -129,6 +152,9 @@ def get_routes(start, end):
     return routes
 
 
+# --------------------------
+# Routes
+# --------------------------
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -144,6 +170,9 @@ def hazard():
     return render_template("hazard.html")
 
 
+# --------------------------
+# Route API
+# --------------------------
 @app.route("/api/route", methods=["POST"])
 def route_api():
 
@@ -161,9 +190,8 @@ def route_api():
 
 
 # --------------------------
-# TRAFFIC HEATMAP API
+# Traffic Heatmap
 # --------------------------
-
 @app.route("/api/traffic_heatmap", methods=["POST"])
 def traffic_heatmap():
 
@@ -171,23 +199,23 @@ def traffic_heatmap():
 
     heat_points = []
 
-    # sample route every ~15 points
-    for i in range(0, len(coords), 15):
+    step = max(1, len(coords) // 20)
+
+    for i in range(0, len(coords), step):
 
         lat = coords[i][0]
         lon = coords[i][1]
 
         traffic = get_traffic(lat, lon)
 
-        heat_points.append([lat, lon, traffic/100])
+        heat_points.append([lat, lon, traffic / 100])
 
     return jsonify({"heat": heat_points})
 
 
 # --------------------------
-# Hazard detection
+# Hazard Detection
 # --------------------------
-
 @app.route("/analyze_video", methods=["POST"])
 def analyze_video():
 
@@ -203,7 +231,7 @@ def analyze_video():
     hazards = 0
     frame_count = 0
 
-    vehicle_classes = ["car","truck","bus","motorcycle"]
+    vehicle_classes = ["car", "truck", "bus", "motorcycle"]
 
     while True:
 
