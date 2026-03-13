@@ -2,9 +2,12 @@ Flask
 requests
 polyline
 python-dotenv
-ultralytics
-opencv-python-headless
 numpy
-torch --index-url https://download.pytorch.org/whl/cpu
-torchvision --index-url https://download.pytorch.org/whl/cpu
+opencv-python-headless
 gunicorn
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2
+torchvision==0.17.2
+
+ultralytics

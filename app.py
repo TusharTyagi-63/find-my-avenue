@@ -4,9 +4,11 @@ import polyline
 import cv2
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
-from ultralytics import YOLO
 
 load_dotenv()
+
+# Prevent ultralytics permission issues on Render
+os.environ["YOLO_CONFIG_DIR"] = "/tmp"
 
 app = Flask(__name__)
 
@@ -20,18 +22,19 @@ model = None
 
 
 # --------------------------
-# Load YOLO Model (Lazy)
+# Lazy YOLO loader
 # --------------------------
 def get_model():
     global model
     if model is None:
+        from ultralytics import YOLO
         print("Loading YOLO model...")
         model = YOLO("yolov8n.pt")
     return model
 
 
 # --------------------------
-# Parse Location Input
+# Parse location
 # --------------------------
 def parse_location(text):
     if not text:
@@ -45,7 +48,7 @@ def parse_location(text):
 
 
 # --------------------------
-# Geocode using ORS
+# Geocode
 # --------------------------
 def geocode_location(place):
 
@@ -67,7 +70,7 @@ def geocode_location(place):
 
 
 # --------------------------
-# Traffic Data (TomTom)
+# Traffic API
 # --------------------------
 def get_traffic(lat, lon):
 
@@ -89,7 +92,7 @@ def get_traffic(lat, lon):
 
 
 # --------------------------
-# Route Generation
+# Route generation
 # --------------------------
 def get_routes(start, end):
 
@@ -127,7 +130,7 @@ def get_routes(start, end):
 
         summary = r["summary"]
 
-        lat, lon = decoded[len(decoded) // 2]
+        lat, lon = decoded[len(decoded)//2]
 
         traffic = get_traffic(lat, lon)
 
@@ -141,10 +144,10 @@ def get_routes(start, end):
 
         routes.append({
             "coords": decoded,
-            "distance": round(distance_km, 2),
-            "duration": round(duration_min, 2),
+            "distance": round(distance_km,2),
+            "duration": round(duration_min,2),
             "traffic": traffic,
-            "risk": round(risk, 2)
+            "risk": round(risk,2)
         })
 
     routes = sorted(routes, key=lambda x: x["risk"])
@@ -153,7 +156,7 @@ def get_routes(start, end):
 
 
 # --------------------------
-# Routes
+# Pages
 # --------------------------
 @app.route("/")
 def home():
@@ -199,7 +202,7 @@ def traffic_heatmap():
 
     heat_points = []
 
-    step = max(1, len(coords) // 20)
+    step = max(1, len(coords)//20)
 
     for i in range(0, len(coords), step):
 
@@ -208,13 +211,13 @@ def traffic_heatmap():
 
         traffic = get_traffic(lat, lon)
 
-        heat_points.append([lat, lon, traffic / 100])
+        heat_points.append([lat, lon, traffic/100])
 
     return jsonify({"heat": heat_points})
 
 
 # --------------------------
-# Hazard Detection
+# Hazard detection
 # --------------------------
 @app.route("/analyze_video", methods=["POST"])
 def analyze_video():
@@ -231,7 +234,7 @@ def analyze_video():
     hazards = 0
     frame_count = 0
 
-    vehicle_classes = ["car", "truck", "bus", "motorcycle"]
+    vehicle_classes = ["car","truck","bus","motorcycle"]
 
     while True:
 
@@ -275,4 +278,5 @@ def analyze_video():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
