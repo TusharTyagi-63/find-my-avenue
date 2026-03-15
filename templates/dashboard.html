@@ -75,18 +75,14 @@ let summary="";
 
 data.routes.forEach((route,i)=>{
 
-route.segments.forEach(seg=>{
-
-let poly=L.polyline(seg.coords,{
-color:seg.color,
-weight:6
+let poly=L.polyline(route.coords,{
+color:route.color,
+weight:7
 }).addTo(map)
 
 lines.push(poly)
 
-})
-
-summary+=`Route ${i+1} → Distance ${route.distance} km | Duration ${route.duration} min <br>`
+summary+=`Route ${i+1} → Distance ${route.distance} km | Duration ${route.duration} min | Traffic ${route.traffic}% <br>`
 
 })
 

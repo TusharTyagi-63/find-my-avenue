@@ -94,7 +94,6 @@ def get_routes(start, end):
     }
 
     res=requests.post(url,json=body,headers=headers)
-
     data=res.json()
 
     routes=[]
@@ -103,36 +102,40 @@ def get_routes(start, end):
 
         decoded=polyline.decode(r["geometry"])
 
-        segments=[]
+        checkpoints=[
+            decoded[0],
+            decoded[len(decoded)//4],
+            decoded[len(decoded)//2],
+            decoded[(len(decoded)*3)//4],
+            decoded[-1]
+        ]
 
-        step=max(1,len(decoded)//25)
+        traffic_values=[]
 
-        for i in range(0,len(decoded)-step,step):
+        for point in checkpoints:
 
-            lat=decoded[i][0]
-            lon=decoded[i][1]
-
+            lat,lon=point
             traffic=get_traffic(lat,lon)
 
-            if traffic<30:
-                color="green"
-            elif traffic<60:
-                color="yellow"
-            else:
-                color="red"
+            traffic_values.append(traffic)
 
-            segments.append({
-                "coords":[decoded[i],decoded[i+step]],
-                "traffic":traffic,
-                "color":color
-            })
+        avg_traffic=sum(traffic_values)/len(traffic_values)
+
+        if avg_traffic<30:
+            color="green"
+        elif avg_traffic<60:
+            color="yellow"
+        else:
+            color="red"
 
         summary=r["summary"]
 
         routes.append({
-            "segments":segments,
+            "coords":decoded,
             "distance":round(summary["distance"]/1000,2),
-            "duration":round(summary["duration"]/60,2)
+            "duration":round(summary["duration"]/60,2),
+            "traffic":round(avg_traffic,1),
+            "color":color
         })
 
     return routes
@@ -202,7 +205,6 @@ def analyze_video():
             for box in r.boxes:
 
                 cls=int(box.cls[0])
-
                 label=model.names[cls]
 
                 if label in vehicle_classes:
