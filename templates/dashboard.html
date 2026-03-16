@@ -45,6 +45,34 @@ attribution: 'Traffic \u00a9 TomTom'
 var trafficVisible = false;
 var startMarker = null;
 
+function buildRouteStyle(route, index){
+
+let dashArray = null;
+
+if (index === 1) {
+dashArray = "10 10";
+} else if (index === 2) {
+dashArray = "5 10";
+}
+
+return {
+color:route.color,
+weight:trafficVisible ? 4 : 6,
+opacity:trafficVisible ? 0.4 : 0.9,
+dashArray:dashArray
+};
+
+}
+
+
+function refreshRouteStyles(){
+
+lines.forEach(function(line, index){
+line.setStyle(buildRouteStyle(line.routeData, index));
+});
+
+}
+
 function getLocation(){
 
 if (!navigator.geolocation) {
@@ -82,6 +110,7 @@ map.removeLayer(trafficLayer);
 button.textContent = "Show Traffic";
 document.getElementById("summaryBar").innerHTML = "Traffic overlay hidden. Click Show Traffic to color the live road network.";
 trafficVisible = false;
+refreshRouteStyles();
 return;
 }
 
@@ -89,6 +118,7 @@ trafficLayer.addTo(map);
 button.textContent = "Hide Traffic";
 document.getElementById("summaryBar").innerHTML = "Traffic overlay is live. Green roads are moving well and red roads are slower.";
 trafficVisible = true;
+refreshRouteStyles();
 
 }
 
@@ -135,11 +165,8 @@ let summary = [];
 
 data.routes.forEach(function(route, index){
 
-let poly = L.polyline(route.coords,{
-color:route.color,
-weight:6,
-opacity:0.9
-}).addTo(map);
+let poly = L.polyline(route.coords, buildRouteStyle(route, index)).addTo(map);
+poly.routeData = route;
 
 lines.push(poly);
 

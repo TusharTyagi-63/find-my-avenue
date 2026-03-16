@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import uuid
 
 import cv2
@@ -16,9 +17,10 @@ os.environ.setdefault(
 )
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
 UPLOAD_FOLDER = os.path.join("static", "uploads")
-ROUTE_COLORS = ["#38bdf8", "#22c55e", "#f59e0b"]
+ROUTE_COLORS = ["#2563eb", "#6366f1", "#94a3b8"]
 ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -26,6 +28,8 @@ ORS_API_KEY = os.getenv("ORS_API_KEY")
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
 
 model = None
+analysis_jobs = {}
+analysis_lock = threading.Lock()
 
 
 def get_model():
@@ -54,6 +58,31 @@ def resize_frame(frame, max_width=720):
     new_height = max(1, int(height * scale))
 
     return cv2.resize(frame, (max_width, new_height))
+
+
+def set_analysis_job(job_id, **values):
+    with analysis_lock:
+        analysis_jobs.setdefault(job_id, {}).update(values)
+
+
+def get_analysis_job(job_id):
+    with analysis_lock:
+        job = analysis_jobs.get(job_id)
+        return dict(job) if job is not None else None
+
+
+def build_risk_status(hazards, sampled_frames):
+    average_vehicle_density = hazards / sampled_frames
+    risk_score = min(100, int(round(average_vehicle_density * 20)))
+
+    if risk_score < 30:
+        status = "Safe Route"
+    elif risk_score < 60:
+        status = "Moderate Risk"
+    else:
+        status = "High Risk Route"
+
+    return risk_score, status
 
 
 def parse_location(text):
@@ -137,6 +166,102 @@ def get_routes(start, end):
     return routes
 
 
+def analyze_saved_video(job_id, path):
+    cap = None
+
+    try:
+        set_analysis_job(
+            job_id,
+            status="processing",
+            message="Opening the uploaded video...",
+        )
+
+        cap = cv2.VideoCapture(path)
+
+        if not cap.isOpened():
+            raise ValueError("The server could not read that video file.")
+
+        detector = get_model()
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = fps if fps and fps > 0 else 24
+        frame_interval = max(int(round(fps)), 12)
+        max_frames = 12
+        frame_index = 0
+        sampled_frames = 0
+        hazards = 0
+        vehicle_classes = {"car", "truck", "bus", "motorcycle"}
+
+        set_analysis_job(
+            job_id,
+            status="processing",
+            message="Scanning the video for vehicles...",
+        )
+
+        while sampled_frames < max_frames:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ret, frame = cap.read()
+
+            if not ret:
+                break
+
+            sampled_frames += 1
+            frame_index += frame_interval
+            frame = resize_frame(frame)
+            results = detector.predict(
+                frame, imgsz=640, conf=0.25, verbose=False, device="cpu"
+            )
+
+            for result in results:
+                if result.boxes is None:
+                    continue
+
+                for box in result.boxes:
+                    cls = int(box.cls[0])
+
+                    if isinstance(detector.names, dict):
+                        label = detector.names.get(cls, str(cls))
+                    else:
+                        label = detector.names[cls]
+
+                    if label in vehicle_classes:
+                        hazards += 1
+
+        if sampled_frames == 0:
+            raise ValueError("No readable frames were found in the uploaded video.")
+
+        risk_score, status = build_risk_status(hazards, sampled_frames)
+
+        set_analysis_job(
+            job_id,
+            status="completed",
+            message="Analysis complete.",
+            result={
+                "hazards": hazards,
+                "risk_score": risk_score,
+                "status": status,
+                "frames_analyzed": sampled_frames,
+            },
+        )
+    except ValueError as exc:
+        set_analysis_job(job_id, status="failed", error=str(exc))
+    except Exception:
+        app.logger.exception("Video analysis failed.")
+        set_analysis_job(
+            job_id,
+            status="failed",
+            error="Video analysis failed on the server. Try a shorter MP4 clip.",
+        )
+    finally:
+        if cap is not None:
+            cap.release()
+
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                app.logger.warning("Could not remove uploaded file: %s", path)
+
+
 @app.route("/api/traffic/tile/<int:z>/<int:x>/<int:y>.png")
 def traffic_tile(z, x, y):
     if not TOMTOM_API_KEY:
@@ -173,6 +298,11 @@ def dashboard():
 @app.route("/hazard")
 def hazard():
     return render_template("hazard.html")
+
+
+@app.errorhandler(413)
+def request_entity_too_large(_error):
+    return jsonify({"error": "Video is too large. Upload a clip under 50 MB."}), 413
 
 
 @app.route("/api/route",methods=["POST"])
@@ -214,96 +344,42 @@ def analyze_video():
     filename = secure_filename(file.filename)
     extension = os.path.splitext(filename)[1].lower() or ".mp4"
     path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}{extension}")
-    cap = None
-
     try:
         file.save(path)
-        cap = cv2.VideoCapture(path)
-
-        if not cap.isOpened():
-            return jsonify({"error": "The server could not read that video file."}), 400
-
-        detector = get_model()
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        fps = fps if fps and fps > 0 else 24
-        frame_interval = max(int(round(fps)), 12)
-        max_frames = 12
-        frame_index = 0
-        sampled_frames = 0
-        hazards = 0
-        vehicle_classes = {"car", "truck", "bus", "motorcycle"}
-
-        while sampled_frames < max_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ret, frame = cap.read()
-
-            if not ret:
-                break
-
-            sampled_frames += 1
-            frame_index += frame_interval
-            frame = resize_frame(frame)
-            results = detector.predict(
-                frame, imgsz=640, conf=0.25, verbose=False, device="cpu"
-            )
-
-            for result in results:
-                if result.boxes is None:
-                    continue
-
-                for box in result.boxes:
-                    cls = int(box.cls[0])
-
-                    if isinstance(detector.names, dict):
-                        label = detector.names.get(cls, str(cls))
-                    else:
-                        label = detector.names[cls]
-
-                    if label in vehicle_classes:
-                        hazards += 1
-
-        if sampled_frames == 0:
-            return jsonify(
-                {"error": "No readable frames were found in the uploaded video."}
-            ), 400
-
-        average_vehicle_density = hazards / sampled_frames
-        risk_score = min(100, int(round(average_vehicle_density * 20)))
-
-        if risk_score < 30:
-            status = "Safe Route"
-        elif risk_score < 60:
-            status = "Moderate Risk"
-        else:
-            status = "High Risk Route"
-
-        return jsonify(
-            {
-                "hazards": hazards,
-                "risk_score": risk_score,
-                "status": status,
-                "frames_analyzed": sampled_frames,
-            }
+        job_id = uuid.uuid4().hex
+        set_analysis_job(
+            job_id,
+            status="processing",
+            message="Upload complete. Analysis started.",
         )
-    except Exception:
-        app.logger.exception("Video analysis failed.")
+        thread = threading.Thread(
+            target=analyze_saved_video,
+            args=(job_id, path),
+            daemon=True,
+        )
+        thread.start()
         return jsonify(
             {
-                "error": (
-                    "Video analysis failed on the server. Try a shorter MP4 clip after "
-                    "redeploying these changes."
-                )
+                "job_id": job_id,
+                "status": "processing",
+                "message": "Upload complete. Analysis started.",
             }
+        ), 202
+    except OSError:
+        app.logger.exception("Could not save uploaded video.")
+        return jsonify(
+            {"error": "The server could not save that video file."}
         ), 500
-    finally:
-        if cap is not None:
-            cap.release()
 
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except OSError:
-                app.logger.warning("Could not remove uploaded file: %s", path)
+
+@app.route("/analyze_video/<job_id>", methods=["GET"])
+def analyze_video_status(job_id):
+    job = get_analysis_job(job_id)
+
+    if job is None:
+        return jsonify({"error": "Analysis job not found."}), 404
+
+    return jsonify(job)
 
 
 if __name__=="__main__":

@@ -47,15 +47,76 @@
 var uploadForm = document.getElementById("uploadForm");
 var result = document.getElementById("result");
 var analyzeButton = document.getElementById("analyzeButton");
+var pollHandle = null;
 
 function showResult(message, state) {
 result.className = "status-box " + state;
 result.innerHTML = message;
 }
 
+function stopPolling() {
+if (pollHandle) {
+clearInterval(pollHandle);
+pollHandle = null;
+}
+}
+
+function cleanServerText(text) {
+return text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+async function readPayload(res) {
+let text = await res.text();
+
+if (!text) {
+return {};
+}
+
+try {
+return JSON.parse(text);
+} catch (error) {
+return {raw_text: cleanServerText(text)};
+}
+}
+
+async function pollAnalysis(jobId) {
+let res = await fetch("/analyze_video/" + jobId);
+let data = await readPayload(res);
+
+if (!res.ok) {
+throw new Error(data.error || ("Could not read analysis status (" + res.status + ")."));
+}
+
+if (data.status === "processing") {
+showResult(data.message || "Still analyzing your video...", "loading");
+return;
+}
+
+stopPolling();
+
+if (data.status === "completed" && data.result) {
+showResult(
+"Detected Vehicles: " + data.result.hazards +
+"<br>Frames Analyzed: " + data.result.frames_analyzed +
+"<br>Risk Score: " + data.result.risk_score +
+"<br>Status: " + data.result.status,
+"success"
+);
+return;
+}
+
+if (data.status === "failed") {
+showResult(data.error || "Video analysis failed.", "error");
+return;
+}
+
+showResult("The server returned an unknown analysis status.", "error");
+}
+
 uploadForm.onsubmit = async function(e){
 
 e.preventDefault();
+stopPolling();
 
 let fileInput = this.querySelector('input[name="video"]');
 
@@ -76,18 +137,29 @@ method:"POST",
 body:form
 });
 
-let data;
-
-try {
-data = await res.json();
-} catch (error) {
-throw new Error("The server returned an unexpected response.");
-}
+let data = await readPayload(res);
 
 if (!res.ok) {
-throw new Error(data.error || "Video analysis failed.");
+if (data.raw_text) {
+throw new Error("Request failed (" + res.status + "). " + data.raw_text);
 }
 
+throw new Error(data.error || ("Video analysis failed (" + res.status + ")."));
+}
+
+if (data.job_id) {
+showResult(data.message || "Upload complete. Analysis started.", "loading");
+pollHandle = setInterval(function(){
+pollAnalysis(data.job_id).catch(function(error){
+stopPolling();
+showResult(error.message, "error");
+});
+}, 2000);
+await pollAnalysis(data.job_id);
+return;
+}
+
+if (typeof data.hazards !== "undefined") {
 showResult(
 "Detected Vehicles: " + data.hazards +
 "<br>Frames Analyzed: " + data.frames_analyzed +
@@ -95,6 +167,10 @@ showResult(
 "<br>Status: " + data.status,
 "success"
 );
+return;
+}
+
+throw new Error("The server did not return a usable analysis result.");
 } catch (error) {
 showResult(error.message, "error");
 } finally {
