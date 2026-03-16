@@ -51,6 +51,7 @@ cursor:wait;
 }
 
 textarea,
+.panel select,
 .panel input{
 padding:10px 12px;
 border-radius:10px;
@@ -63,6 +64,7 @@ width:100%;
 }
 
 textarea::placeholder,
+.panel select::placeholder,
 .panel input::placeholder{
 color:#94a3b8;
 }
@@ -256,6 +258,25 @@ line-height:1.5;
 color:#e2e8f0;
 font-size:0.94rem;
 line-height:1.5;
+}
+
+.service-list{
+display:flex;
+flex-wrap:wrap;
+gap:8px;
+margin-top:4px;
+}
+
+.service-pill{
+display:inline-flex;
+align-items:center;
+justify-content:center;
+padding:6px 10px;
+border-radius:999px;
+background:#172554;
+color:#dbeafe;
+font-size:0.8rem;
+font-weight:bold;
 }
 
 .empty-state{

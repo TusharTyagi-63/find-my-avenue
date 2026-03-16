@@ -32,6 +32,38 @@ ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 SEVERITY_WEIGHTS = {"low": 1.0, "medium": 2.4, "high": 4.0}
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3}
 CUSTOM_HAZARD_MODEL_PATH = os.getenv("ROAD_HAZARD_MODEL_PATH")
+INCIDENT_SERVICE_PROFILES = {
+    "accident": [
+        "Simulated Ambulance Dispatch",
+        "Simulated Police Control Room",
+        "Simulated Hospital Desk",
+    ],
+    "road blockage": [
+        "Simulated Police Control Room",
+        "Simulated Road Maintenance Cell",
+        "Simulated Ambulance Dispatch",
+    ],
+    "flooding": [
+        "Simulated Disaster Response Cell",
+        "Simulated Police Control Room",
+        "Simulated Ambulance Dispatch",
+    ],
+    "fire": [
+        "Simulated Fire Response Desk",
+        "Simulated Ambulance Dispatch",
+        "Simulated Police Control Room",
+    ],
+    "medical emergency": [
+        "Simulated Ambulance Dispatch",
+        "Simulated Hospital Desk",
+        "Simulated Police Control Room",
+    ],
+}
+ALERT_STATUS_BY_SEVERITY = {
+    "low": "Monitoring and advisory sent",
+    "medium": "Priority dispatch simulated",
+    "high": "Critical dispatch simulated",
+}
 
 os.makedirs(INSTANCE_FOLDER, exist_ok=True)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -91,6 +123,29 @@ def init_db():
                 ADD COLUMN source_location TEXT NOT NULL DEFAULT ''
                 """
             )
+
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS emergency_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                road_location TEXT NOT NULL,
+                source_location TEXT NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                incident_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                trigger_mode TEXT NOT NULL,
+                dispatch_status TEXT NOT NULL,
+                services_notified TEXT NOT NULL,
+                emergency_contact_name TEXT,
+                emergency_contact_phone TEXT,
+                notes TEXT,
+                linked_hazard_id INTEGER,
+                alert_message TEXT NOT NULL
+            )
+            """
+        )
 
     connection.close()
 
@@ -230,6 +285,138 @@ def get_recent_hazards(limit=100):
     ).fetchall()
     connection.close()
     return [serialize_hazard_row(row) for row in rows]
+
+
+def get_hazard_by_id(hazard_id):
+    connection = get_db_connection()
+    row = connection.execute(
+        "SELECT * FROM hazard_records WHERE id = ?",
+        (hazard_id,),
+    ).fetchone()
+    connection.close()
+    return serialize_hazard_row(row) if row else None
+
+
+def build_emergency_services(incident_type, severity):
+    services = []
+
+    for index, service_name in enumerate(
+        INCIDENT_SERVICE_PROFILES.get(
+            incident_type,
+            INCIDENT_SERVICE_PROFILES["accident"],
+        ),
+        start=1,
+    ):
+        services.append(
+            {
+                "service": service_name,
+                "channel": f"Simulated API channel #{index}",
+                "status": "notified",
+                "priority": severity,
+            }
+        )
+
+    return services
+
+
+def serialize_emergency_row(row):
+    data = dict(row)
+    data["services_notified"] = json.loads(data["services_notified"] or "[]")
+    data["latitude"] = round(float(data["latitude"]), 6)
+    data["longitude"] = round(float(data["longitude"]), 6)
+    data["source_location"] = (
+        data.get("source_location") or data["road_location"]
+    ).strip()
+    return data
+
+
+def insert_emergency_alert(
+    road_location,
+    source_location,
+    coordinates,
+    incident_type,
+    severity,
+    trigger_mode,
+    services_notified,
+    emergency_contact_name,
+    emergency_contact_phone,
+    notes,
+    linked_hazard_id,
+):
+    source_location = (source_location or road_location).strip()
+    dispatch_status = ALERT_STATUS_BY_SEVERITY[severity]
+    alert_message = (
+        f"{severity.title()} {incident_type} alert near {road_location}. "
+        f"Source: {source_location}. "
+        f"{dispatch_status}."
+    )
+
+    connection = get_db_connection()
+
+    with connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO emergency_alerts (
+                created_at,
+                road_location,
+                source_location,
+                latitude,
+                longitude,
+                incident_type,
+                severity,
+                trigger_mode,
+                dispatch_status,
+                services_notified,
+                emergency_contact_name,
+                emergency_contact_phone,
+                notes,
+                linked_hazard_id,
+                alert_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now_iso(),
+                road_location,
+                source_location,
+                coordinates[0],
+                coordinates[1],
+                incident_type,
+                severity,
+                trigger_mode,
+                dispatch_status,
+                json.dumps(services_notified),
+                emergency_contact_name or "",
+                emergency_contact_phone or "",
+                notes or "",
+                linked_hazard_id,
+                alert_message,
+            ),
+        )
+        alert_id = cursor.lastrowid
+
+    row = connection.execute(
+        "SELECT * FROM emergency_alerts WHERE id = ?",
+        (alert_id,),
+    ).fetchone()
+    connection.close()
+
+    return serialize_emergency_row(row)
+
+
+def get_recent_emergency_alerts(limit=20):
+    connection = get_db_connection()
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM emergency_alerts
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    connection.close()
+    return [serialize_emergency_row(row) for row in rows]
 
 
 def parse_location(text):
@@ -842,6 +1029,11 @@ def hazard():
     return render_template("hazard.html")
 
 
+@app.route("/emergency")
+def emergency():
+    return render_template("emergency.html")
+
+
 @app.errorhandler(413)
 def request_entity_too_large(_error):
     return jsonify({"error": "Video is too large. Upload a clip under 50 MB."}), 413
@@ -854,6 +1046,78 @@ def hazards_api():
         limit = 100
     limit = max(1, min(limit, 250))
     return jsonify({"hazards": get_recent_hazards(limit=limit)})
+
+
+@app.route("/api/emergency", methods=["GET", "POST"])
+def emergency_api():
+    if request.method == "GET":
+        limit = request.args.get("limit", default=20, type=int)
+        if limit is None:
+            limit = 20
+        limit = max(1, min(limit, 100))
+        return jsonify({"alerts": get_recent_emergency_alerts(limit=limit)})
+
+    data = request.get_json(silent=True) or {}
+    road_location = (data.get("road_location") or "").strip()
+    source_location = (data.get("source_location") or "").strip() or road_location
+    incident_type = (data.get("incident_type") or "").strip().lower()
+    severity = (data.get("severity") or "").strip().lower()
+    trigger_mode = (data.get("trigger_mode") or "manual report").strip()
+    notes = (data.get("notes") or "").strip()
+    emergency_contact_name = (data.get("emergency_contact_name") or "").strip()
+    emergency_contact_phone = (data.get("emergency_contact_phone") or "").strip()
+    linked_hazard_id = data.get("linked_hazard_id")
+
+    if not road_location:
+        return jsonify({"error": "Add the emergency location first."}), 400
+
+    if incident_type not in INCIDENT_SERVICE_PROFILES:
+        return jsonify({"error": "Choose a supported incident type."}), 400
+
+    if severity not in ALERT_STATUS_BY_SEVERITY:
+        return jsonify({"error": "Choose a valid severity."}), 400
+
+    coordinates = parse_location(road_location)
+
+    if coordinates is None:
+        return jsonify({"error": "Could not understand that emergency location."}), 400
+
+    hazard = None
+    normalized_hazard_id = None
+
+    if linked_hazard_id not in (None, "", "null"):
+        try:
+            normalized_hazard_id = int(linked_hazard_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Linked hazard id is invalid."}), 400
+
+        hazard = get_hazard_by_id(normalized_hazard_id)
+
+        if hazard is None:
+            return jsonify({"error": "The selected hazard report was not found."}), 404
+
+    services_notified = build_emergency_services(incident_type, severity)
+    alert = insert_emergency_alert(
+        road_location,
+        source_location,
+        coordinates,
+        incident_type,
+        severity,
+        trigger_mode,
+        services_notified,
+        emergency_contact_name,
+        emergency_contact_phone,
+        notes,
+        normalized_hazard_id,
+    )
+
+    return jsonify(
+        {
+            "message": "Emergency alert simulation created. Rescue services were marked as notified.",
+            "alert": alert,
+            "linked_hazard": hazard,
+        }
+    ), 201
 
 
 @app.route("/api/route", methods=["POST"])

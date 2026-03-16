@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+<title>Emergency Module</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+</head>
+
+<body>
+
+<div class="navbar">
+
+<a href="/">Home</a>
+<a href="/dashboard">Routes</a>
+<a href="/hazard">Hazard Detection</a>
+<a href="/emergency">Emergency Module</a>
+
+</div>
+
+<div class="page-shell column-layout">
+
+<div class="panel panel-wide">
+<h2>Emergency Response Module</h2>
+<p class="helper-text">This prototype simulates how the system can escalate a serious accident, fire, blockage, or flood event to rescue services using the road location, source location, and recent hazard context.</p>
+
+<form id="emergencyForm">
+
+<div class="form-grid">
+<label class="field-group">
+<span>Emergency Location</span>
+<input id="roadLocationInput" type="text" name="road_location" placeholder="e.g. Sambhal, UP or 28.67,78.49" required>
+</label>
+
+<label class="field-group">
+<span>Source Location</span>
+<input id="sourceLocationInput" type="text" name="source_location" placeholder="Where the alert was captured or reported from">
+</label>
+
+<div class="field-group button-group field-span">
+<span>&nbsp;</span>
+<button type="button" onclick="getCurrentLocation()">Use My Location For Source</button>
+</div>
+
+<label class="field-group">
+<span>Incident Type</span>
+<select id="incidentTypeInput" name="incident_type">
+<option value="accident">Accident</option>
+<option value="road blockage">Road Blockage</option>
+<option value="flooding">Flooding</option>
+<option value="fire">Fire</option>
+<option value="medical emergency">Medical Emergency</option>
+</select>
+</label>
+
+<label class="field-group">
+<span>Severity</span>
+<select id="severityInput" name="severity">
+<option value="high">High</option>
+<option value="medium">Medium</option>
+<option value="low">Low</option>
+</select>
+</label>
+
+<label class="field-group">
+<span>Trigger Mode</span>
+<select id="triggerModeInput" name="trigger_mode">
+<option value="Manual report">Manual report</option>
+<option value="Hazard-assisted trigger">Hazard-assisted trigger</option>
+<option value="Driver SOS trigger">Driver SOS trigger</option>
+</select>
+</label>
+
+<label class="field-group">
+<span>Link Hazard Report</span>
+<select id="linkedHazardInput" name="linked_hazard_id">
+<option value="">None</option>
+</select>
+</label>
+
+<label class="field-group">
+<span>Emergency Contact Name</span>
+<input type="text" name="emergency_contact_name" placeholder="Optional family or local contact">
+</label>
+
+<label class="field-group">
+<span>Emergency Contact Phone</span>
+<input type="text" name="emergency_contact_phone" placeholder="Optional callback number">
+</label>
+
+<label class="field-group field-span">
+<span>Incident Notes</span>
+<textarea name="notes" rows="3" placeholder="Describe the crash, blockage, flooding, injuries, smoke, or any other visible details."></textarea>
+</label>
+
+<div class="field-group button-group field-span">
+<button id="triggerButton" type="submit">Trigger Demo Emergency Alert</button>
+</div>
+</div>
+
+</form>
+
+<div id="alertResult" class="status-box">Fill in the emergency details and trigger a simulated dispatch.</div>
+
+</div>
+
+<div class="panel panel-wide">
+<div class="section-head">
+<h3>Recent Emergency Alerts</h3>
+<button type="button" onclick="loadAlerts()">Refresh</button>
+</div>
+<div id="alertList" class="report-list">
+<div class="empty-state">Loading alert timeline...</div>
+</div>
+</div>
+
+</div>
+
+<script>
+
+var emergencyForm = document.getElementById("emergencyForm");
+var alertResult = document.getElementById("alertResult");
+var triggerButton = document.getElementById("triggerButton");
+var roadLocationInput = document.getElementById("roadLocationInput");
+var sourceLocationInput = document.getElementById("sourceLocationInput");
+var incidentTypeInput = document.getElementById("incidentTypeInput");
+var severityInput = document.getElementById("severityInput");
+var triggerModeInput = document.getElementById("triggerModeInput");
+var linkedHazardInput = document.getElementById("linkedHazardInput");
+var alertList = document.getElementById("alertList");
+
+function showResult(message, state) {
+alertResult.className = "status-box " + state;
+alertResult.innerHTML = message;
+}
+
+function cleanServerText(text) {
+return text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function escapeHtml(value) {
+return String(value)
+.replace(/&/g, "&amp;")
+.replace(/</g, "&lt;")
+.replace(/>/g, "&gt;")
+.replace(/\"/g, "&quot;")
+.replace(/'/g, "&#39;");
+}
+
+function titleCase(value) {
+return String(value).replace(/\b\w/g, function(letter) {
+return letter.toUpperCase();
+});
+}
+
+async function readPayload(res) {
+let text = await res.text();
+
+if (!text) {
+return {};
+}
+
+try {
+return JSON.parse(text);
+} catch (error) {
+return {raw_text: cleanServerText(text)};
+}
+}
+
+function renderLinkedHazards(hazards) {
+linkedHazardInput.innerHTML = '<option value="">None</option>' + hazards.map(function(hazard) {
+return '<option value="' + hazard.id + '">' +
+escapeHtml('#' + hazard.id + ' | ' + hazard.location_label + ' | ' + hazard.severity) +
+'</option>';
+}).join("");
+}
+
+function renderAlerts(alerts) {
+if (!alerts.length) {
+alertList.innerHTML = '<div class="empty-state">No emergency alerts yet. Trigger a simulated dispatch to build the timeline.</div>';
+return;
+}
+
+alertList.innerHTML = alerts.map(function(alert) {
+let services = (alert.services_notified || []).map(function(service) {
+return '<span class="service-pill">' + escapeHtml(service.service) + '</span>';
+}).join("");
+
+return `
+<article class="report-card">
+<div class="card-top">
+<strong>${escapeHtml(titleCase(alert.incident_type))}</strong>
+<span class="tag ${escapeHtml(alert.severity)}">${escapeHtml(alert.severity)}</span>
+</div>
+<div class="report-meta">Road: ${escapeHtml(alert.road_location)}</div>
+<div class="report-meta">Source: ${escapeHtml(alert.source_location || alert.road_location)}</div>
+<div class="report-meta">Dispatch: ${escapeHtml(alert.dispatch_status)}</div>
+<div class="report-meta">Trigger: ${escapeHtml(alert.trigger_mode)}</div>
+${alert.linked_hazard_id ? `<div class="report-meta">Linked Hazard Report: #${alert.linked_hazard_id}</div>` : ''}
+${services ? `<div class="service-list">${services}</div>` : ''}
+${alert.emergency_contact_name ? `<div class="report-meta">Emergency Contact: ${escapeHtml(alert.emergency_contact_name)} ${alert.emergency_contact_phone ? '(' + escapeHtml(alert.emergency_contact_phone) + ')' : ''}</div>` : ''}
+${alert.notes ? `<div class="report-note">${escapeHtml(alert.notes)}</div>` : ''}
+<div class="report-meta">${escapeHtml(alert.created_at)}</div>
+</article>
+`;
+}).join("");
+}
+
+async function loadHazards() {
+try {
+let res = await fetch("/api/hazards?limit=12");
+let data = await readPayload(res);
+
+if (!res.ok) {
+throw new Error(data.error || "Could not load recent hazard reports.");
+}
+
+renderLinkedHazards(data.hazards || []);
+} catch (error) {
+renderLinkedHazards([]);
+}
+}
+
+async function loadAlerts() {
+alertList.innerHTML = '<div class="empty-state">Loading alert timeline...</div>';
+
+try {
+let res = await fetch("/api/emergency?limit=8");
+let data = await readPayload(res);
+
+if (!res.ok) {
+throw new Error(data.error || "Could not load emergency alerts.");
+}
+
+renderAlerts(data.alerts || []);
+} catch (error) {
+alertList.innerHTML = '<div class="empty-state">' + escapeHtml(error.message) + '</div>';
+}
+}
+
+function getCurrentLocation() {
+if (!navigator.geolocation) {
+showResult("Geolocation is not supported in this browser.", "error");
+return;
+}
+
+navigator.geolocation.getCurrentPosition(function(pos) {
+let coordinates = pos.coords.latitude + "," + pos.coords.longitude;
+sourceLocationInput.value = coordinates;
+
+if (!roadLocationInput.value.trim()) {
+roadLocationInput.value = coordinates;
+}
+
+showResult("Current location added to the source field for the emergency report.", "success");
+}, function() {
+showResult("Could not fetch your current location.", "error");
+});
+}
+
+linkedHazardInput.onchange = async function() {
+let hazardId = this.value;
+
+if (!hazardId) {
+return;
+}
+
+try {
+let res = await fetch("/api/hazards?limit=50");
+let data = await readPayload(res);
+
+if (!res.ok) {
+return;
+}
+
+let hazard = (data.hazards || []).find(function(item) {
+return String(item.id) === String(hazardId);
+});
+
+if (!hazard) {
+return;
+}
+
+roadLocationInput.value = hazard.location_label;
+
+if (!sourceLocationInput.value.trim()) {
+sourceLocationInput.value = hazard.source_location || hazard.location_label;
+}
+
+if (triggerModeInput.value === "Manual report") {
+triggerModeInput.value = "Hazard-assisted trigger";
+}
+
+if (hazard.severity === "high") {
+severityInput.value = "high";
+} else if (hazard.severity === "medium") {
+severityInput.value = "medium";
+}
+
+if (hazard.hazard_type && incidentTypeInput.value === "accident") {
+if (hazard.hazard_type.indexOf("flood") !== -1) {
+incidentTypeInput.value = "flooding";
+} else if (hazard.hazard_type.indexOf("block") !== -1) {
+incidentTypeInput.value = "road blockage";
+}
+}
+
+showResult("Linked hazard report loaded into the emergency form.", "loading");
+} catch (error) {
+}
+};
+
+emergencyForm.onsubmit = async function(e) {
+e.preventDefault();
+
+if (!roadLocationInput.value.trim()) {
+showResult("Add the emergency location before triggering the alert.", "error");
+return;
+}
+
+if (!sourceLocationInput.value.trim()) {
+sourceLocationInput.value = roadLocationInput.value.trim();
+}
+
+let payload = {
+road_location: roadLocationInput.value.trim(),
+source_location: sourceLocationInput.value.trim(),
+incident_type: incidentTypeInput.value,
+severity: severityInput.value,
+trigger_mode: triggerModeInput.value,
+linked_hazard_id: linkedHazardInput.value || null,
+emergency_contact_name: this.emergency_contact_name.value.trim(),
+emergency_contact_phone: this.emergency_contact_phone.value.trim(),
+notes: this.notes.value.trim()
+};
+
+triggerButton.disabled = true;
+triggerButton.textContent = "Triggering...";
+showResult("Creating the simulated emergency alert and rescue notification payload...", "loading");
+
+try {
+let res = await fetch("/api/emergency", {
+method: "POST",
+headers: {"Content-Type": "application/json"},
+body: JSON.stringify(payload)
+});
+
+let data = await readPayload(res);
+
+if (!res.ok) {
+if (data.raw_text) {
+throw new Error("Request failed (" + res.status + "). " + data.raw_text);
+}
+
+throw new Error(data.error || ("Emergency alert failed (" + res.status + ")."));
+}
+
+let services = (data.alert.services_notified || []).map(function(service) {
+return escapeHtml(service.service);
+}).join(", ");
+
+let linkedHazardText = data.linked_hazard
+? "<br>Linked Hazard: #" + data.linked_hazard.id + " at " + escapeHtml(data.linked_hazard.location_label)
+: "";
+
+showResult(
+escapeHtml(data.message || "Emergency alert created.") +
+"<br>Dispatch Status: " + escapeHtml(data.alert.dispatch_status) +
+"<br>Road Location: " + escapeHtml(data.alert.road_location) +
+"<br>Source Location: " + escapeHtml(data.alert.source_location) +
+"<br>Services Notified: " + escapeHtml(services) +
+linkedHazardText,
+"success"
+);
+
+loadAlerts();
+} catch (error) {
+showResult(error.message, "error");
+} finally {
+triggerButton.disabled = false;
+triggerButton.textContent = "Trigger Demo Emergency Alert";
+}
+};
+
+loadHazards();
+loadAlerts();
+
+</script>
+
+</body>
+</html>
