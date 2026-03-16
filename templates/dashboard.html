@@ -18,8 +18,10 @@
 <a href="/hazard">Hazard Detection</a>
 <a href="/emergency">Emergency Module</a>
 
-<input id="start" placeholder="Start">
-<input id="end" placeholder="End">
+<input id="start" list="startSuggestions" placeholder="Start: city, college, hospital, landmark">
+<datalist id="startSuggestions"></datalist>
+<input id="end" list="endSuggestions" placeholder="Destination: city, college, hospital, landmark">
+<datalist id="endSuggestions"></datalist>
 
 <div class="mode-switch" id="modeSwitch">
 <button type="button" class="mode-button active" data-mode="drive" onclick="setRouteMode('drive', true)">Drive</button>
@@ -33,7 +35,7 @@
 
 </div>
 
-<div id="summaryBar">Routes now combine live traffic viewing with saved road hazard reports from analyzed clips.</div>
+<div id="summaryBar">Search by city, college, hospital, or landmark. Routes combine live traffic viewing with saved road hazard reports from analyzed clips.</div>
 <div id="trafficLegend" class="traffic-legend hidden">
 <span class="legend-pill green">Green</span>
 <span class="legend-pill amber">Amber</span>
@@ -63,6 +65,7 @@ attribution: 'Traffic \u00a9 TomTom'
 var trafficVisible = false;
 var startMarker = null;
 var selectedMode = "drive";
+var locationSuggestionCache = {};
 var routeModeLabels = {
 drive: "Drive",
 ride: "Ride",
@@ -160,6 +163,67 @@ renderHazards(data.hazards || []);
 } catch (error) {
 }
 
+}
+
+
+function updateLocationSuggestions(listId, suggestions) {
+let datalist = document.getElementById(listId);
+datalist.innerHTML = "";
+
+suggestions.forEach(function(item) {
+let option = document.createElement("option");
+option.value = item.label;
+option.label = item.label;
+datalist.appendChild(option);
+});
+}
+
+
+async function fetchLocationSuggestions(query, listId) {
+let trimmedQuery = query.trim();
+
+if (trimmedQuery.length < 3) {
+updateLocationSuggestions(listId, []);
+return;
+}
+
+if (locationSuggestionCache[trimmedQuery]) {
+updateLocationSuggestions(listId, locationSuggestionCache[trimmedQuery]);
+return;
+}
+
+try {
+let res = await fetch("/api/location-search?q=" + encodeURIComponent(trimmedQuery) + "&limit=5");
+let data = await res.json();
+
+if (!res.ok) {
+updateLocationSuggestions(listId, []);
+return;
+}
+
+let suggestions = data.suggestions || [];
+locationSuggestionCache[trimmedQuery] = suggestions;
+updateLocationSuggestions(listId, suggestions);
+} catch (error) {
+updateLocationSuggestions(listId, []);
+}
+}
+
+
+function attachLocationAutocomplete(inputId, listId) {
+let input = document.getElementById(inputId);
+let debounceHandle = null;
+
+input.addEventListener("input", function() {
+clearTimeout(debounceHandle);
+debounceHandle = setTimeout(function() {
+fetchLocationSuggestions(input.value, listId);
+}, 250);
+});
+
+input.addEventListener("focus", function() {
+fetchLocationSuggestions(input.value, listId);
+});
 }
 
 
@@ -327,6 +391,8 @@ summaryBar.innerHTML = "Could not load routes right now.";
 
 
 loadHazards();
+attachLocationAutocomplete("start", "startSuggestions");
+attachLocationAutocomplete("end", "endSuggestions");
 
 </script>
 

@@ -34,6 +34,61 @@ ROUTE_MODES = {
     "ride": {"profile": "cycling-regular", "label": "Ride"},
     "walk": {"profile": "foot-walking", "label": "Walk"},
 }
+DEFAULT_COUNTRY_HINT = os.getenv("GEOCODE_COUNTRY_HINT", "India")
+PLACE_RESULT_LIMIT = 6
+SPECIFIC_PLACE_TAGS = {
+    "amenity",
+    "building",
+    "education",
+    "emergency",
+    "healthcare",
+    "historic",
+    "landuse",
+    "leisure",
+    "office",
+    "railway",
+    "shop",
+    "tourism",
+    "university",
+}
+SPECIFIC_PLACE_TYPES = {
+    "airport",
+    "bank",
+    "bus_station",
+    "cafe",
+    "clinic",
+    "college",
+    "hospital",
+    "hostel",
+    "hotel",
+    "library",
+    "mall",
+    "marketplace",
+    "museum",
+    "park",
+    "school",
+    "station",
+    "stadium",
+    "supermarket",
+    "temple",
+    "train_station",
+    "university",
+}
+BROAD_PLACE_TYPES = {
+    "administrative",
+    "city",
+    "country",
+    "county",
+    "district",
+    "hamlet",
+    "locality",
+    "neighbourhood",
+    "region",
+    "state",
+    "suburb",
+    "town",
+    "village",
+}
 ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 SEVERITY_WEIGHTS = {"low": 1.0, "medium": 2.4, "high": 4.0}
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3}
@@ -667,6 +722,210 @@ def get_recent_emergency_alerts(limit=20):
     return [serialize_emergency_row(row) for row in rows]
 
 
+def normalize_place_query(text):
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def build_place_query_variants(place):
+    normalized = normalize_place_query(place)
+
+    if not normalized:
+        return []
+
+    variants = [normalized]
+    lower_text = normalized.lower()
+
+    if (
+        DEFAULT_COUNTRY_HINT
+        and DEFAULT_COUNTRY_HINT.lower() not in lower_text
+        and "india" not in lower_text
+    ):
+        variants.append(f"{normalized}, {DEFAULT_COUNTRY_HINT}")
+
+    return variants
+
+
+def score_location_candidate(query, candidate):
+    normalized_query = normalize_place_query(query).lower()
+    tokens = [token for token in re.split(r"[^a-z0-9]+", normalized_query) if token]
+    search_blob = " ".join(
+        [
+            candidate.get("label", ""),
+            candidate.get("name", ""),
+            candidate.get("display_name", ""),
+            candidate.get("category", ""),
+            candidate.get("type", ""),
+            candidate.get("layer", ""),
+        ]
+    ).lower()
+    matched_tokens = sum(1 for token in tokens if token in search_blob)
+    coverage = matched_tokens / max(len(tokens), 1)
+    score = coverage * 7
+
+    if normalized_query and normalized_query in search_blob:
+        score += 2.8
+
+    if candidate.get("category") in SPECIFIC_PLACE_TAGS:
+        score += 1.8
+
+    if candidate.get("type") in SPECIFIC_PLACE_TYPES:
+        score += 2.2
+
+    if candidate.get("layer") in {"venue", "address", "street"}:
+        score += 1.4
+
+    if candidate.get("type") in BROAD_PLACE_TYPES and len(tokens) > 1:
+        score -= 1.8
+
+    if candidate.get("source") == "ors":
+        score += float(candidate.get("confidence", 0)) * 1.6
+    else:
+        score += float(candidate.get("importance", 0)) * 1.8
+
+    return round(score, 4)
+
+
+def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT):
+    if not ORS_API_KEY:
+        return []
+
+    candidates = []
+
+    for query in build_place_query_variants(place):
+        try:
+            response = requests.get(
+                "https://api.openrouteservice.org/geocode/search",
+                params={"api_key": ORS_API_KEY, "text": query, "size": limit},
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException:
+            continue
+        except ValueError:
+            continue
+
+        for feature in data.get("features", []):
+            try:
+                properties = feature.get("properties", {})
+                coordinates = feature["geometry"]["coordinates"]
+                candidate = {
+                    "label": properties.get("label")
+                    or properties.get("name")
+                    or query,
+                    "name": properties.get("name") or "",
+                    "display_name": properties.get("label")
+                    or properties.get("name")
+                    or query,
+                    "latitude": float(coordinates[1]),
+                    "longitude": float(coordinates[0]),
+                    "category": properties.get("category") or "",
+                    "type": properties.get("type") or "",
+                    "layer": properties.get("layer") or "",
+                    "confidence": float(properties.get("confidence") or 0.0),
+                    "source": "ors",
+                }
+                candidate["score"] = score_location_candidate(place, candidate)
+                candidates.append(candidate)
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+
+        if candidates:
+            break
+
+    return candidates
+
+
+def search_nominatim_candidates(place, limit=PLACE_RESULT_LIMIT):
+    candidates = []
+
+    for query in build_place_query_variants(place):
+        try:
+            response = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": query,
+                    "format": "jsonv2",
+                    "limit": limit,
+                    "addressdetails": 1,
+                    "namedetails": 1,
+                    "extratags": 1,
+                },
+                headers={"User-Agent": "find-my-avenue/1.0"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException:
+            continue
+        except ValueError:
+            continue
+
+        for item in data:
+            try:
+                candidate = {
+                    "label": item.get("display_name") or query,
+                    "name": item.get("name")
+                    or item.get("namedetails", {}).get("name")
+                    or "",
+                    "display_name": item.get("display_name") or query,
+                    "latitude": float(item["lat"]),
+                    "longitude": float(item["lon"]),
+                    "category": item.get("class") or item.get("category") or "",
+                    "type": item.get("type") or "",
+                    "layer": "",
+                    "importance": float(item.get("importance") or 0.0),
+                    "source": "nominatim",
+                }
+                candidate["score"] = score_location_candidate(place, candidate)
+                candidates.append(candidate)
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        if candidates:
+            break
+
+    return candidates
+
+
+def dedupe_location_candidates(candidates, limit=PLACE_RESULT_LIMIT):
+    deduped = []
+    seen = set()
+
+    for candidate in sorted(
+        candidates,
+        key=lambda item: item.get("score", 0),
+        reverse=True,
+    ):
+        key = (
+            round(candidate["latitude"], 5),
+            round(candidate["longitude"], 5),
+            candidate["label"].lower(),
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        deduped.append(candidate)
+
+        if len(deduped) >= limit:
+            break
+
+    return deduped
+
+
+def search_location_candidates(place, limit=PLACE_RESULT_LIMIT):
+    normalized = normalize_place_query(place)
+
+    if not normalized:
+        return []
+
+    candidates = search_ors_candidates(normalized, limit=limit)
+    candidates.extend(search_nominatim_candidates(normalized, limit=limit))
+    return dedupe_location_candidates(candidates, limit=limit)
+
+
 def parse_location(text):
     if not text:
         return None
@@ -686,46 +945,13 @@ def parse_location(text):
 
 
 def geocode_location(place):
-    if not place:
+    candidates = search_location_candidates(place, limit=1)
+
+    if not candidates:
         return None
 
-    if ORS_API_KEY:
-        try:
-            response = requests.get(
-                "https://api.openrouteservice.org/geocode/search",
-                params={"api_key": ORS_API_KEY, "text": place, "size": 1},
-                timeout=15,
-            )
-            response.raise_for_status()
-            data = response.json()
-            features = data.get("features", [])
-
-            if features:
-                coords = features[0]["geometry"]["coordinates"]
-                return coords[1], coords[0]
-        except requests.RequestException:
-            pass
-        except (KeyError, IndexError, TypeError, ValueError):
-            pass
-
-    try:
-        response = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": place, "format": "jsonv2", "limit": 1},
-            headers={"User-Agent": "find-my-avenue/1.0"},
-            timeout=15,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        if not data:
-            return None
-
-        return float(data[0]["lat"]), float(data[0]["lon"])
-    except requests.RequestException:
-        return None
-    except (KeyError, IndexError, TypeError, ValueError):
-        return None
+    best_match = candidates[0]
+    return best_match["latitude"], best_match["longitude"]
 
 
 def extract_service_error(response, fallback):
@@ -1306,6 +1532,31 @@ def hazards_api():
         limit = 100
     limit = max(1, min(limit, 250))
     return jsonify({"hazards": get_recent_hazards(limit=limit)})
+
+
+@app.route("/api/location-search", methods=["GET"])
+def location_search_api():
+    query = request.args.get("q", default="", type=str)
+    limit = request.args.get("limit", default=5, type=int)
+    limit = max(1, min(limit or 5, 8))
+
+    if len(normalize_place_query(query)) < 3:
+        return jsonify({"suggestions": []})
+
+    suggestions = search_location_candidates(query, limit=limit)
+
+    return jsonify(
+        {
+            "suggestions": [
+                {
+                    "label": item["label"],
+                    "latitude": item["latitude"],
+                    "longitude": item["longitude"],
+                }
+                for item in suggestions
+            ]
+        }
+    )
 
 
 @app.route("/api/emergency", methods=["GET", "POST"])
