@@ -29,6 +29,11 @@ UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "uploads")
 
 HAZARD_INFLUENCE_KM = 0.4
 ROUTE_COLORS = ["#38bdf8", "#6366f1", "#94a3b8"]
+ROUTE_MODES = {
+    "drive": {"profile": "driving-car", "label": "Drive"},
+    "ride": {"profile": "cycling-regular", "label": "Ride"},
+    "walk": {"profile": "foot-walking", "label": "Walk"},
+}
 ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 SEVERITY_WEIGHTS = {"low": 1.0, "medium": 2.4, "high": 4.0}
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3}
@@ -761,11 +766,23 @@ def build_route_results(data):
     return routes
 
 
-def get_routes(start, end):
+def normalize_route_mode(mode):
+    if not mode:
+        return "drive"
+
+    normalized = str(mode).strip().lower()
+    return normalized if normalized in ROUTE_MODES else None
+
+
+def get_routes(start, end, mode="drive"):
     if not ORS_API_KEY:
         raise RuntimeError("OpenRouteService API key is missing.")
 
-    url = "https://api.openrouteservice.org/v2/directions/driving-car"
+    route_mode = ROUTE_MODES[mode]
+    url = (
+        "https://api.openrouteservice.org/v2/directions/"
+        f"{route_mode['profile']}"
+    )
     base_body = {"coordinates": [[start[1], start[0]], [end[1], end[0]]]}
     attempts = [
         {
@@ -1422,12 +1439,16 @@ def route_api():
     data = request.get_json(silent=True) or {}
     start = parse_location(data.get("start"))
     end = parse_location(data.get("end"))
+    mode = normalize_route_mode(data.get("mode"))
 
     if start is None or end is None:
         return jsonify({"error": "Enter valid start and end locations."}), 400
 
+    if mode is None:
+        return jsonify({"error": "Choose a valid travel mode."}), 400
+
     try:
-        routes = get_routes(start, end)
+        routes = get_routes(start, end, mode=mode)
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 502
     except (KeyError, TypeError, ValueError):
@@ -1437,7 +1458,13 @@ def route_api():
     if not routes:
         return jsonify({"error": "No routes were found for that trip."}), 404
 
-    return jsonify({"routes": enrich_routes_with_hazards(routes)})
+    return jsonify(
+        {
+            "routes": enrich_routes_with_hazards(routes),
+            "mode": mode,
+            "mode_label": ROUTE_MODES[mode]["label"],
+        }
+    )
 
 
 @app.route("/analyze_video", methods=["POST"])

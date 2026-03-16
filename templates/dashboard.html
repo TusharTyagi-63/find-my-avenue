@@ -21,6 +21,12 @@
 <input id="start" placeholder="Start">
 <input id="end" placeholder="End">
 
+<div class="mode-switch" id="modeSwitch">
+<button type="button" class="mode-button active" data-mode="drive" onclick="setRouteMode('drive', true)">Drive</button>
+<button type="button" class="mode-button" data-mode="ride" onclick="setRouteMode('ride', true)">Ride</button>
+<button type="button" class="mode-button" data-mode="walk" onclick="setRouteMode('walk', true)">Walk</button>
+</div>
+
 <button onclick="getLocation()">My Location</button>
 <button onclick="getRoute()">Get Route</button>
 <button id="trafficButton" type="button" onclick="toggleTraffic()">Show Traffic</button>
@@ -56,6 +62,12 @@ attribution: 'Traffic \u00a9 TomTom'
 });
 var trafficVisible = false;
 var startMarker = null;
+var selectedMode = "drive";
+var routeModeLabels = {
+drive: "Drive",
+ride: "Ride",
+walk: "Walk"
+};
 
 function buildRouteStyle(route, index) {
 
@@ -179,6 +191,31 @@ document.getElementById("summaryBar").innerHTML = "Could not fetch your current 
 }
 
 
+function setRouteMode(mode, reroute) {
+
+selectedMode = mode;
+
+document.querySelectorAll(".mode-button").forEach(function(button) {
+button.classList.toggle("active", button.dataset.mode === mode);
+});
+
+let summaryBar = document.getElementById("summaryBar");
+let start = document.getElementById("start").value.trim();
+let end = document.getElementById("end").value.trim();
+let modeLabel = routeModeLabels[mode] || "Drive";
+
+if (!start || !end) {
+summaryBar.innerHTML = modeLabel + " mode selected. Enter your start and end points to load matching routes.";
+return;
+}
+
+if (reroute) {
+getRoute();
+}
+
+}
+
+
 function toggleTraffic() {
 
 let button = document.getElementById("trafficButton");
@@ -215,13 +252,13 @@ summaryBar.innerHTML = "Enter both a start and an end location.";
 return;
 }
 
-summaryBar.innerHTML = "Finding safer routes...";
+summaryBar.innerHTML = "Finding safer routes for " + (routeModeLabels[selectedMode] || "Drive").toLowerCase() + " mode...";
 
 try {
 let res = await fetch("/api/route",{
 method:"POST",
 headers:{"Content-Type":"application/json"},
-body:JSON.stringify({start:start,end:end})
+body:JSON.stringify({start:start,end:end,mode:selectedMode})
 });
 
 let data = {};
@@ -244,6 +281,7 @@ return;
 
 let summary = [];
 let recommendedLine = null;
+let modeLabel = data.mode_label || routeModeLabels[selectedMode] || "Drive";
 
 data.routes.forEach(function(route, index) {
 
@@ -275,7 +313,7 @@ map.fitBounds(lines[0].getBounds(), {padding:[20,20]});
 }
 
 if (summary.length) {
-summaryBar.innerHTML = summary.join("<br>");
+summaryBar.innerHTML = modeLabel + " mode routes:<br>" + summary.join("<br>");
 } else {
 summaryBar.innerHTML = "No routes were returned for this trip.";
 }

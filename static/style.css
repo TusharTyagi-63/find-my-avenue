@@ -31,6 +31,28 @@ border:none;
 min-width:220px;
 }
 
+.mode-switch{
+display:flex;
+flex-wrap:wrap;
+gap:8px;
+}
+
+.mode-button{
+background:#0f172a;
+color:#cbd5e1;
+border:1px solid #334155;
+}
+
+.mode-button:hover{
+background:#172554;
+}
+
+.mode-button.active{
+background:#2563eb;
+border-color:#2563eb;
+color:white;
+}
+
 button{
 background:#2563eb;
 color:white;
