@@ -27,6 +27,11 @@
 </div>
 
 <div id="summaryBar">Routes now combine live traffic viewing with saved road hazard reports from analyzed clips.</div>
+<div id="trafficLegend" class="traffic-legend hidden">
+<span class="legend-pill green">Green</span>
+<span class="legend-pill amber">Amber</span>
+<span class="legend-pill red">Red</span>
+</div>
 <div id="map"></div>
 
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
@@ -36,11 +41,16 @@
 var map = L.map('map').setView([28.6,77.2],6);
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+map.createPane('trafficPane');
+map.getPane('trafficPane').style.zIndex = 430;
+map.getPane('trafficPane').style.pointerEvents = 'none';
+map.getPane('trafficPane').style.filter = 'saturate(2.2) contrast(1.3) brightness(1.04)';
 
 var lines = [];
 var hazardMarkers = [];
 var trafficLayer = L.tileLayer('/api/traffic/tile/{z}/{x}/{y}.png', {
-opacity: 0.9,
+pane: 'trafficPane',
+opacity: 0.98,
 attribution: 'Traffic \u00a9 TomTom'
 });
 var trafficVisible = false;
@@ -57,9 +67,9 @@ dashArray = "5 10";
 }
 
 return {
-color: route.color,
-weight: route.recommended ? (trafficVisible ? 5 : 7) : (trafficVisible ? 4 : 5),
-opacity: route.recommended ? (trafficVisible ? 0.7 : 0.95) : (trafficVisible ? 0.35 : 0.82),
+color: trafficVisible ? (route.recommended ? "#0f172a" : "#334155") : route.color,
+weight: route.recommended ? (trafficVisible ? 4 : 7) : (trafficVisible ? 3 : 5),
+opacity: route.recommended ? (trafficVisible ? 0.4 : 0.95) : (trafficVisible ? 0.18 : 0.82),
 dashArray: dashArray
 };
 
@@ -111,6 +121,7 @@ weight: 2
 
 marker.bindPopup(
 "<strong>" + hazard.location_label + "</strong><br>" +
+"Source: " + (hazard.source_location || hazard.location_label) + "<br>" +
 "Hazard: " + hazard.hazard_type + "<br>" +
 "Severity: " + hazard.severity + "<br>" +
 "Risk Score: " + hazard.risk_score + "<br>" +
@@ -170,10 +181,12 @@ document.getElementById("summaryBar").innerHTML = "Could not fetch your current 
 function toggleTraffic() {
 
 let button = document.getElementById("trafficButton");
+let legend = document.getElementById("trafficLegend");
 
 if (trafficVisible) {
 map.removeLayer(trafficLayer);
 button.textContent = "Show Traffic";
+legend.classList.add("hidden");
 document.getElementById("summaryBar").innerHTML = "Traffic overlay hidden. Hazard markers and safety-ranked routes remain visible.";
 trafficVisible = false;
 refreshRouteStyles();
@@ -182,7 +195,8 @@ return;
 
 trafficLayer.addTo(map);
 button.textContent = "Hide Traffic";
-document.getElementById("summaryBar").innerHTML = "Traffic overlay is live. Route ranking still comes from saved hazard reports near each path.";
+legend.classList.remove("hidden");
+document.getElementById("summaryBar").innerHTML = "Traffic overlay is live with stronger contrast. Red roads show the heaviest congestion, amber is moderate, and green is moving well.";
 trafficVisible = true;
 refreshRouteStyles();
 

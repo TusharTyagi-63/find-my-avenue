@@ -22,7 +22,7 @@
 
 <div class="panel panel-wide">
 <h2>Road Hazard Detection</h2>
-<p class="helper-text">Upload a short road clip under 50 MB, tag the location, and the app will save detected hazards for safer future routing.</p>
+<p class="helper-text">Upload a short road clip under 50 MB, tag the road location, and add the source location if the clip was captured or reported from somewhere specific.</p>
 
 <form id="uploadForm">
 
@@ -32,9 +32,14 @@
 <input id="locationInput" type="text" name="location" placeholder="e.g. Sambhal, UP or 28.67,78.49" required>
 </label>
 
-<div class="field-group button-group">
+<label class="field-group">
+<span>Source Location</span>
+<input id="sourceLocationInput" type="text" name="source_location" placeholder="Where the clip was captured or reported from">
+</label>
+
+<div class="field-group button-group field-span">
 <span>&nbsp;</span>
-<button type="button" onclick="getCurrentLocation()">Use My Location</button>
+<button type="button" onclick="getCurrentLocation()">Use My Location For Source</button>
 </div>
 
 <label class="field-group field-span">
@@ -53,7 +58,7 @@
 
 </form>
 
-<div id="result" class="status-box">Add a road location, upload a short clip, and start analysis.</div>
+<div id="result" class="status-box">Add the road location, optional source location, then upload a short clip and start analysis.</div>
 
 </div>
 
@@ -75,6 +80,7 @@ var uploadForm = document.getElementById("uploadForm");
 var result = document.getElementById("result");
 var analyzeButton = document.getElementById("analyzeButton");
 var locationInput = document.getElementById("locationInput");
+var sourceLocationInput = document.getElementById("sourceLocationInput");
 var reportList = document.getElementById("reportList");
 var pollHandle = null;
 
@@ -135,6 +141,7 @@ return `
 <span class="tag ${escapeHtml(hazard.severity)}">${escapeHtml(hazard.severity)}</span>
 </div>
 <div class="report-meta">${escapeHtml(hazard.hazard_type)} | Risk ${hazard.risk_score} | Detections ${hazard.hazard_count}</div>
+<div class="report-meta">Source: ${escapeHtml(hazard.source_location || hazard.location_label)}</div>
 <div class="report-meta">${formatBreakdown(hazard.severity_breakdown)}</div>
 <div class="report-meta">${escapeHtml(hazard.created_at)}</div>
 ${hazard.notes ? `<div class="report-note">${escapeHtml(hazard.notes)}</div>` : ''}
@@ -167,8 +174,14 @@ return;
 }
 
 navigator.geolocation.getCurrentPosition(function(pos) {
-locationInput.value = pos.coords.latitude + "," + pos.coords.longitude;
-showResult("Current location added. Upload a road clip when you are ready.", "success");
+let coordinates = pos.coords.latitude + "," + pos.coords.longitude;
+sourceLocationInput.value = coordinates;
+
+if (!locationInput.value.trim()) {
+locationInput.value = coordinates;
+}
+
+showResult("Current location added to the source field. You can still edit the road location separately.", "success");
 }, function() {
 showResult("Could not fetch your current location.", "error");
 });
@@ -195,6 +208,9 @@ let reportMessage = data.result.record
 : "<br>No strong road hazard was saved from this clip.";
 
 showResult(
+"Road Location: " + escapeHtml(data.result.location.label) +
+"<br>Source Location: " + escapeHtml(data.result.location.source_label || data.result.location.label) +
+"<br>" +
 "Detected Road Hazards: " + data.result.hazard_count +
 "<br>Frames Analyzed: " + data.result.frames_analyzed +
 "<br>Risk Score: " + data.result.risk_score +
@@ -227,6 +243,10 @@ let fileInput = this.querySelector('input[name="video"]');
 if (!locationInput.value.trim()) {
 showResult("Add the road location before analyzing so the result can be used for routing.", "error");
 return;
+}
+
+if (!sourceLocationInput.value.trim()) {
+sourceLocationInput.value = locationInput.value.trim();
 }
 
 if (!fileInput.files.length) {

@@ -72,11 +72,25 @@ def init_db():
                 hazard_count INTEGER NOT NULL,
                 frames_analyzed INTEGER NOT NULL,
                 notes TEXT,
+                source_location TEXT NOT NULL DEFAULT '',
                 severity_breakdown TEXT NOT NULL,
                 hazard_breakdown TEXT NOT NULL
             )
             """
         )
+
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(hazard_records)").fetchall()
+        }
+
+        if "source_location" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE hazard_records
+                ADD COLUMN source_location TEXT NOT NULL DEFAULT ''
+                """
+            )
 
     connection.close()
 
@@ -138,7 +152,9 @@ def insert_hazard_record(
     coordinates,
     summary,
     notes,
+    source_location,
 ):
+    source_location = (source_location or location_label).strip()
     connection = get_db_connection()
 
     with connection:
@@ -156,10 +172,11 @@ def insert_hazard_record(
                 hazard_count,
                 frames_analyzed,
                 notes,
+                source_location,
                 severity_breakdown,
                 hazard_breakdown
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 utc_now_iso(),
@@ -173,6 +190,7 @@ def insert_hazard_record(
                 summary["hazard_count"],
                 summary["frames_analyzed"],
                 notes or "",
+                source_location,
                 json.dumps(summary["severity_breakdown"]),
                 json.dumps(summary["hazard_breakdown"]),
             ),
@@ -192,6 +210,7 @@ def serialize_hazard_row(row):
     data = dict(row)
     data["severity_breakdown"] = json.loads(data["severity_breakdown"] or "{}")
     data["hazard_breakdown"] = json.loads(data["hazard_breakdown"] or "{}")
+    data["source_location"] = (data.get("source_location") or data["location_label"]).strip()
     data["confidence"] = round(float(data["confidence"]), 2)
     data["latitude"] = round(float(data["latitude"]), 6)
     data["longitude"] = round(float(data["longitude"]), 6)
@@ -548,11 +567,12 @@ def summarize_detections(all_detections, sampled_frames):
     }
 
 
-def analyze_saved_video(job_id, path, location_label, notes):
+def analyze_saved_video(job_id, path, location_label, source_location, notes):
     cap = None
 
     try:
         coordinates = parse_location(location_label)
+        source_location = (source_location or location_label).strip()
 
         if coordinates is None:
             raise ValueError("Could not understand that road location.")
@@ -615,7 +635,13 @@ def analyze_saved_video(job_id, path, location_label, notes):
         record = None
 
         if summary["hazard_count"] > 0:
-            record = insert_hazard_record(location_label, coordinates, summary, notes)
+            record = insert_hazard_record(
+                location_label,
+                coordinates,
+                summary,
+                notes,
+                source_location,
+            )
 
         set_analysis_job(
             job_id,
@@ -625,6 +651,7 @@ def analyze_saved_video(job_id, path, location_label, notes):
                 **summary,
                 "location": {
                     "label": location_label,
+                    "source_label": source_location,
                     "latitude": round(coordinates[0], 6),
                     "longitude": round(coordinates[1], 6),
                 },
@@ -856,6 +883,7 @@ def route_api():
 def analyze_video():
     file = request.files.get("video")
     location_label = (request.form.get("location") or "").strip()
+    source_location = (request.form.get("source_location") or "").strip()
     notes = (request.form.get("notes") or "").strip()
 
     if file is None or not file.filename:
@@ -885,7 +913,7 @@ def analyze_video():
         )
         thread = threading.Thread(
             target=analyze_saved_video,
-            args=(job_id, path, location_label, notes),
+            args=(job_id, path, location_label, source_location, notes),
             daemon=True,
         )
         thread.start()
