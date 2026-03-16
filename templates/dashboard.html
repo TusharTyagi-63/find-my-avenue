@@ -66,6 +66,10 @@ var trafficVisible = false;
 var startMarker = null;
 var selectedMode = "drive";
 var locationSuggestionCache = {};
+var selectedLocations = {
+start: null,
+end: null
+};
 var routeModeLabels = {
 drive: "Drive",
 ride: "Ride",
@@ -179,33 +183,80 @@ datalist.appendChild(option);
 }
 
 
-async function fetchLocationSuggestions(query, listId) {
+function getOppositeInputId(inputId) {
+return inputId === "start" ? "end" : "start";
+}
+
+
+function getResolvedFocusValue(inputId) {
+let oppositeId = getOppositeInputId(inputId);
+let selected = selectedLocations[oppositeId];
+
+if (selected) {
+return selected.latitude + "," + selected.longitude;
+}
+
+let fallbackValue = document.getElementById(oppositeId).value.trim();
+
+if (/^-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?$/.test(fallbackValue)) {
+return fallbackValue;
+}
+
+return "";
+}
+
+
+function syncSelectedLocation(inputId, suggestions) {
+let currentValue = document.getElementById(inputId).value.trim().toLowerCase();
+let match = suggestions.find(function(item) {
+return item.label.toLowerCase() === currentValue;
+});
+
+selectedLocations[inputId] = match || null;
+}
+
+
+async function fetchLocationSuggestions(query, listId, inputId) {
 let trimmedQuery = query.trim();
 
 if (trimmedQuery.length < 3) {
 updateLocationSuggestions(listId, []);
+selectedLocations[inputId] = null;
 return;
 }
 
-if (locationSuggestionCache[trimmedQuery]) {
-updateLocationSuggestions(listId, locationSuggestionCache[trimmedQuery]);
+let focusValue = getResolvedFocusValue(inputId);
+let cacheKey = trimmedQuery + "|" + focusValue;
+
+if (locationSuggestionCache[cacheKey]) {
+updateLocationSuggestions(listId, locationSuggestionCache[cacheKey]);
+syncSelectedLocation(inputId, locationSuggestionCache[cacheKey]);
 return;
 }
 
 try {
-let res = await fetch("/api/location-search?q=" + encodeURIComponent(trimmedQuery) + "&limit=5");
+let url = "/api/location-search?q=" + encodeURIComponent(trimmedQuery) + "&limit=5";
+
+if (focusValue) {
+url += "&focus=" + encodeURIComponent(focusValue);
+}
+
+let res = await fetch(url);
 let data = await res.json();
 
 if (!res.ok) {
 updateLocationSuggestions(listId, []);
+selectedLocations[inputId] = null;
 return;
 }
 
 let suggestions = data.suggestions || [];
-locationSuggestionCache[trimmedQuery] = suggestions;
+locationSuggestionCache[cacheKey] = suggestions;
 updateLocationSuggestions(listId, suggestions);
+syncSelectedLocation(inputId, suggestions);
 } catch (error) {
 updateLocationSuggestions(listId, []);
+selectedLocations[inputId] = null;
 }
 }
 
@@ -215,15 +266,55 @@ let input = document.getElementById(inputId);
 let debounceHandle = null;
 
 input.addEventListener("input", function() {
+selectedLocations[inputId] = null;
 clearTimeout(debounceHandle);
 debounceHandle = setTimeout(function() {
-fetchLocationSuggestions(input.value, listId);
+fetchLocationSuggestions(input.value, listId, inputId);
 }, 250);
 });
 
 input.addEventListener("focus", function() {
-fetchLocationSuggestions(input.value, listId);
+fetchLocationSuggestions(input.value, listId, inputId);
 });
+
+input.addEventListener("change", function() {
+fetchLocationSuggestions(input.value, listId, inputId);
+});
+}
+
+
+function getResolvedLocationValue(inputId) {
+let selected = selectedLocations[inputId];
+
+if (selected) {
+return selected.latitude + "," + selected.longitude;
+}
+
+return document.getElementById(inputId).value.trim();
+}
+
+
+function formatDurationMinutes(totalMinutes) {
+let roundedMinutes = Math.max(1, Math.round(Number(totalMinutes) || 0));
+let days = Math.floor(roundedMinutes / 1440);
+let remainingMinutes = roundedMinutes % 1440;
+let hours = Math.floor(remainingMinutes / 60);
+let minutes = remainingMinutes % 60;
+let parts = [];
+
+if (days) {
+parts.push(days + (days === 1 ? " day" : " days"));
+}
+
+if (hours) {
+parts.push(hours + " hr");
+}
+
+if (minutes || !parts.length) {
+parts.push(minutes + " min");
+}
+
+return parts.join(" ");
 }
 
 
@@ -240,6 +331,11 @@ var lat = pos.coords.latitude;
 var lon = pos.coords.longitude;
 
 document.getElementById("start").value = lat + "," + lon;
+selectedLocations.start = {
+label: "Current location",
+latitude: lat,
+longitude: lon
+};
 
 map.setView([lat,lon],12);
 
@@ -322,7 +418,11 @@ try {
 let res = await fetch("/api/route",{
 method:"POST",
 headers:{"Content-Type":"application/json"},
-body:JSON.stringify({start:start,end:end,mode:selectedMode})
+body:JSON.stringify({
+start:getResolvedLocationValue("start"),
+end:getResolvedLocationValue("end"),
+mode:selectedMode
+})
 });
 
 let data = {};
@@ -362,7 +462,7 @@ let lead = route.recommended ? "Recommended Route " : "Route ";
 summary.push(
 lead + (index + 1) +
 " -> Distance " + route.distance + " km" +
-" | Duration " + route.duration + " min" +
+" | Duration " + formatDurationMinutes(route.duration) +
 " | Safety " + route.safety_score +
 " | Nearby Hazards " + route.hazard_count +
 " | " + route.safety_label

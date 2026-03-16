@@ -722,6 +722,26 @@ def get_recent_emergency_alerts(limit=20):
     return [serialize_emergency_row(row) for row in rows]
 
 
+def parse_coordinate_pair(text):
+    if not text:
+        return None
+
+    normalized = str(text).strip()
+
+    if "," not in normalized:
+        return None
+
+    parts = [part.strip() for part in normalized.split(",", 1)]
+
+    if len(parts) != 2:
+        return None
+
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+
+
 def normalize_place_query(text):
     return re.sub(r"\s+", " ", (text or "").strip())
 
@@ -745,7 +765,25 @@ def build_place_query_variants(place):
     return variants
 
 
-def score_location_candidate(query, candidate):
+def distance_between_points_km(point_a, point_b):
+    lat1, lon1 = point_a
+    lat2, lon2 = point_b
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lon = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1_rad)
+        * math.cos(lat2_rad)
+        * (math.sin(delta_lon / 2) ** 2)
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return 6371.0088 * c
+
+
+def score_location_candidate(query, candidate, focus=None):
     normalized_query = normalize_place_query(query).lower()
     tokens = [token for token in re.split(r"[^a-z0-9]+", normalized_query) if token]
     search_blob = " ".join(
@@ -782,10 +820,27 @@ def score_location_candidate(query, candidate):
     else:
         score += float(candidate.get("importance", 0)) * 1.8
 
+    if focus is not None:
+        distance_km = distance_between_points_km(
+            focus,
+            (candidate["latitude"], candidate["longitude"]),
+        )
+
+        if distance_km <= 5:
+            score += 4.6
+        elif distance_km <= 25:
+            score += 3.0
+        elif distance_km <= 80:
+            score += 1.6
+        elif distance_km <= 200:
+            score += 0.7
+        elif len(tokens) > 1 and distance_km > 300:
+            score -= 1.6
+
     return round(score, 4)
 
 
-def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT):
+def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT, focus=None):
     if not ORS_API_KEY:
         return []
 
@@ -793,9 +848,15 @@ def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT):
 
     for query in build_place_query_variants(place):
         try:
+            params = {"api_key": ORS_API_KEY, "text": query, "size": limit}
+
+            if focus is not None:
+                params["focus.point.lat"] = focus[0]
+                params["focus.point.lon"] = focus[1]
+
             response = requests.get(
                 "https://api.openrouteservice.org/geocode/search",
-                params={"api_key": ORS_API_KEY, "text": query, "size": limit},
+                params=params,
                 timeout=15,
             )
             response.raise_for_status()
@@ -825,7 +886,11 @@ def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT):
                     "confidence": float(properties.get("confidence") or 0.0),
                     "source": "ors",
                 }
-                candidate["score"] = score_location_candidate(place, candidate)
+                candidate["score"] = score_location_candidate(
+                    place,
+                    candidate,
+                    focus=focus,
+                )
                 candidates.append(candidate)
             except (KeyError, IndexError, TypeError, ValueError):
                 continue
@@ -836,7 +901,7 @@ def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT):
     return candidates
 
 
-def search_nominatim_candidates(place, limit=PLACE_RESULT_LIMIT):
+def search_nominatim_candidates(place, limit=PLACE_RESULT_LIMIT, focus=None):
     candidates = []
 
     for query in build_place_query_variants(place):
@@ -877,7 +942,11 @@ def search_nominatim_candidates(place, limit=PLACE_RESULT_LIMIT):
                     "importance": float(item.get("importance") or 0.0),
                     "source": "nominatim",
                 }
-                candidate["score"] = score_location_candidate(place, candidate)
+                candidate["score"] = score_location_candidate(
+                    place,
+                    candidate,
+                    focus=focus,
+                )
                 candidates.append(candidate)
             except (KeyError, TypeError, ValueError):
                 continue
@@ -915,37 +984,34 @@ def dedupe_location_candidates(candidates, limit=PLACE_RESULT_LIMIT):
     return deduped
 
 
-def search_location_candidates(place, limit=PLACE_RESULT_LIMIT):
+def search_location_candidates(place, limit=PLACE_RESULT_LIMIT, focus=None):
     normalized = normalize_place_query(place)
 
     if not normalized:
         return []
 
-    candidates = search_ors_candidates(normalized, limit=limit)
-    candidates.extend(search_nominatim_candidates(normalized, limit=limit))
+    candidates = search_ors_candidates(normalized, limit=limit, focus=focus)
+    candidates.extend(
+        search_nominatim_candidates(normalized, limit=limit, focus=focus)
+    )
     return dedupe_location_candidates(candidates, limit=limit)
 
 
-def parse_location(text):
+def parse_location(text, focus=None):
     if not text:
         return None
 
     text = text.strip()
+    coordinate_pair = parse_coordinate_pair(text)
 
-    if "," in text:
-        parts = [part.strip() for part in text.split(",", 1)]
+    if coordinate_pair is not None:
+        return coordinate_pair
 
-        if len(parts) == 2:
-            try:
-                return float(parts[0]), float(parts[1])
-            except ValueError:
-                return None
-
-    return geocode_location(text)
+    return geocode_location(text, focus=focus)
 
 
-def geocode_location(place):
-    candidates = search_location_candidates(place, limit=1)
+def geocode_location(place, focus=None):
+    candidates = search_location_candidates(place, limit=1, focus=focus)
 
     if not candidates:
         return None
@@ -1399,7 +1465,7 @@ def score_route_against_hazards(route_coords, hazards):
         return {
             "safety_score": 100.0,
             "hazard_count": 0,
-            "safety_label": "Safer route",
+            "safety_label": "No saved hazards nearby",
             "nearby_hazards": [],
             "penalty": 0.0,
         }
@@ -1435,6 +1501,20 @@ def score_route_against_hazards(route_coords, hazards):
         )
 
     impacts.sort(key=lambda item: item["distance_km"])
+
+    if not impacts:
+        return {
+            "safety_score": 100.0,
+            "hazard_count": 0,
+            "safety_label": (
+                "No saved hazards nearby"
+                if hazards
+                else "No saved hazard reports yet"
+            ),
+            "nearby_hazards": [],
+            "penalty": 0.0,
+        }
+
     safety_score = max(5, round(100 - min(85, penalty * 4), 1))
 
     if safety_score >= 75:
@@ -1538,12 +1618,13 @@ def hazards_api():
 def location_search_api():
     query = request.args.get("q", default="", type=str)
     limit = request.args.get("limit", default=5, type=int)
+    focus = parse_coordinate_pair(request.args.get("focus", default="", type=str))
     limit = max(1, min(limit or 5, 8))
 
     if len(normalize_place_query(query)) < 3:
         return jsonify({"suggestions": []})
 
-    suggestions = search_location_candidates(query, limit=limit)
+    suggestions = search_location_candidates(query, limit=limit, focus=focus)
 
     return jsonify(
         {
@@ -1688,8 +1769,13 @@ def emergency_api():
 @app.route("/api/route", methods=["POST"])
 def route_api():
     data = request.get_json(silent=True) or {}
-    start = parse_location(data.get("start"))
-    end = parse_location(data.get("end"))
+    raw_start = data.get("start")
+    raw_end = data.get("end")
+    start_focus = parse_coordinate_pair(raw_end)
+    end_focus = parse_coordinate_pair(raw_start)
+
+    start = parse_location(raw_start, focus=start_focus)
+    end = parse_location(raw_end, focus=start if start is not None else end_focus)
     mode = normalize_route_mode(data.get("mode"))
 
     if start is None or end is None:
