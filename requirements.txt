@@ -5,6 +5,7 @@ python-dotenv
 numpy<2
 opencv-python-headless
 gunicorn
+twilio
 
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.1.2+cpu

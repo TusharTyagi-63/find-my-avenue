@@ -23,7 +23,7 @@
 
 <div class="panel panel-wide">
 <h2>Emergency Response Module</h2>
-<p class="helper-text">This prototype simulates how the system can escalate a serious accident, fire, blockage, or flood event to rescue services using the road location, source location, and recent hazard context.</p>
+<p class="helper-text">Use this manual emergency trigger to test how the app reacts when something serious happens. You can keep it in simulation mode or send real test SMS alerts and phone calls to custom mobile numbers.</p>
 
 <form id="emergencyForm">
 
@@ -90,18 +90,38 @@
 </label>
 
 <label class="field-group field-span">
+<span>Test Mobile Numbers</span>
+<textarea id="recipientNumbersInput" name="recipient_numbers" rows="2" placeholder="Add one or more numbers like +919876543210, +919812345678"></textarea>
+</label>
+
+<div class="field-group field-span">
+<span>Real Alert Actions</span>
+<div class="choice-row">
+<label class="choice-pill">
+<input id="sendSmsInput" type="checkbox">
+<span>Send real SMS</span>
+</label>
+<label class="choice-pill">
+<input id="sendCallInput" type="checkbox">
+<span>Place real call</span>
+</label>
+</div>
+<div class="helper-note">Use full mobile numbers with country code. Twilio trial accounts usually send only to verified numbers.</div>
+</div>
+
+<label class="field-group field-span">
 <span>Incident Notes</span>
 <textarea name="notes" rows="3" placeholder="Describe the crash, blockage, flooding, injuries, smoke, or any other visible details."></textarea>
 </label>
 
 <div class="field-group button-group field-span">
-<button id="triggerButton" type="submit">Trigger Demo Emergency Alert</button>
+<button id="triggerButton" type="submit">Trigger Manual Emergency Alert</button>
 </div>
 </div>
 
 </form>
 
-<div id="alertResult" class="status-box">Fill in the emergency details and trigger a simulated dispatch.</div>
+<div id="alertResult" class="status-box">Fill in the emergency details. You can save a simulated alert or send real test SMS/calls to the numbers you provide.</div>
 
 </div>
 
@@ -128,6 +148,9 @@ var incidentTypeInput = document.getElementById("incidentTypeInput");
 var severityInput = document.getElementById("severityInput");
 var triggerModeInput = document.getElementById("triggerModeInput");
 var linkedHazardInput = document.getElementById("linkedHazardInput");
+var recipientNumbersInput = document.getElementById("recipientNumbersInput");
+var sendSmsInput = document.getElementById("sendSmsInput");
+var sendCallInput = document.getElementById("sendCallInput");
 var alertList = document.getElementById("alertList");
 
 function showResult(message, state) {
@@ -178,7 +201,7 @@ escapeHtml('#' + hazard.id + ' | ' + hazard.location_label + ' | ' + hazard.seve
 
 function renderAlerts(alerts) {
 if (!alerts.length) {
-alertList.innerHTML = '<div class="empty-state">No emergency alerts yet. Trigger a simulated dispatch to build the timeline.</div>';
+alertList.innerHTML = '<div class="empty-state">No emergency alerts yet. Trigger a manual alert to build the timeline.</div>';
 return;
 }
 
@@ -197,8 +220,14 @@ return `
 <div class="report-meta">Source: ${escapeHtml(alert.source_location || alert.road_location)}</div>
 <div class="report-meta">Dispatch: ${escapeHtml(alert.dispatch_status)}</div>
 <div class="report-meta">Trigger: ${escapeHtml(alert.trigger_mode)}</div>
+<div class="report-meta">Provider: ${escapeHtml(alert.provider || "simulation")}</div>
+${(alert.requested_channels || []).length ? `<div class="report-meta">Channels: ${escapeHtml(alert.requested_channels.join(", "))}</div>` : '<div class="report-meta">Channels: simulation only</div>'}
+${(alert.recipient_numbers || []).length ? `<div class="report-meta">Recipients: ${escapeHtml(alert.recipient_numbers.join(", "))}</div>` : ''}
 ${alert.linked_hazard_id ? `<div class="report-meta">Linked Hazard Report: #${alert.linked_hazard_id}</div>` : ''}
 ${services ? `<div class="service-list">${services}</div>` : ''}
+${(alert.notification_results || []).length ? `<div class="delivery-list">` + alert.notification_results.map(function(result) {
+return `<div class="delivery-item">${escapeHtml(result.channel.toUpperCase())} to ${escapeHtml(result.to)} -> ${escapeHtml(result.status)}${result.error ? ` (${escapeHtml(result.error)})` : ''}</div>`;
+}).join("") + `</div>` : ''}
 ${alert.emergency_contact_name ? `<div class="report-meta">Emergency Contact: ${escapeHtml(alert.emergency_contact_name)} ${alert.emergency_contact_phone ? '(' + escapeHtml(alert.emergency_contact_phone) + ')' : ''}</div>` : ''}
 ${alert.notes ? `<div class="report-note">${escapeHtml(alert.notes)}</div>` : ''}
 <div class="report-meta">${escapeHtml(alert.created_at)}</div>
@@ -323,6 +352,11 @@ if (!sourceLocationInput.value.trim()) {
 sourceLocationInput.value = roadLocationInput.value.trim();
 }
 
+if ((sendSmsInput.checked || sendCallInput.checked) && !recipientNumbersInput.value.trim()) {
+showResult("Add at least one test mobile number before sending a real SMS or call.", "error");
+return;
+}
+
 let payload = {
 road_location: roadLocationInput.value.trim(),
 source_location: sourceLocationInput.value.trim(),
@@ -332,12 +366,15 @@ trigger_mode: triggerModeInput.value,
 linked_hazard_id: linkedHazardInput.value || null,
 emergency_contact_name: this.emergency_contact_name.value.trim(),
 emergency_contact_phone: this.emergency_contact_phone.value.trim(),
+recipient_numbers: recipientNumbersInput.value.trim(),
+send_sms: sendSmsInput.checked,
+send_call: sendCallInput.checked,
 notes: this.notes.value.trim()
 };
 
 triggerButton.disabled = true;
 triggerButton.textContent = "Triggering...";
-showResult("Creating the simulated emergency alert and rescue notification payload...", "loading");
+showResult("Creating the emergency alert and attempting any selected real notifications...", "loading");
 
 try {
 let res = await fetch("/api/emergency", {
@@ -363,6 +400,10 @@ return escapeHtml(service.service);
 let linkedHazardText = data.linked_hazard
 ? "<br>Linked Hazard: #" + data.linked_hazard.id + " at " + escapeHtml(data.linked_hazard.location_label)
 : "";
+let deliveryText = data.delivery_summary ? "<br>Delivery: " + escapeHtml(data.delivery_summary) : "";
+let realResults = (data.alert.notification_results || []).map(function(result) {
+return "<br>" + escapeHtml(result.channel.toUpperCase()) + " to " + escapeHtml(result.to) + " -> " + escapeHtml(result.status) + (result.error ? " (" + escapeHtml(result.error) + ")" : "");
+}).join("");
 
 showResult(
 escapeHtml(data.message || "Emergency alert created.") +
@@ -370,7 +411,9 @@ escapeHtml(data.message || "Emergency alert created.") +
 "<br>Road Location: " + escapeHtml(data.alert.road_location) +
 "<br>Source Location: " + escapeHtml(data.alert.source_location) +
 "<br>Services Notified: " + escapeHtml(services) +
-linkedHazardText,
+deliveryText +
+linkedHazardText +
+realResults,
 "success"
 );
 
@@ -379,7 +422,7 @@ loadAlerts();
 showResult(error.message, "error");
 } finally {
 triggerButton.disabled = false;
-triggerButton.textContent = "Trigger Demo Emergency Alert";
+triggerButton.textContent = "Trigger Manual Emergency Alert";
 }
 };
 

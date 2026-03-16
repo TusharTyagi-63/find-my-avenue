@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import sqlite3
 import tempfile
 import threading
@@ -73,6 +74,10 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
 ORS_API_KEY = os.getenv("ORS_API_KEY")
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_SMS_FROM_NUMBER = os.getenv("TWILIO_SMS_FROM_NUMBER")
+TWILIO_VOICE_FROM_NUMBER = os.getenv("TWILIO_VOICE_FROM_NUMBER") or TWILIO_SMS_FROM_NUMBER
 
 model = None
 analysis_jobs = {}
@@ -142,10 +147,35 @@ def init_db():
                 emergency_contact_phone TEXT,
                 notes TEXT,
                 linked_hazard_id INTEGER,
-                alert_message TEXT NOT NULL
+                alert_message TEXT NOT NULL,
+                recipient_numbers TEXT NOT NULL DEFAULT '[]',
+                requested_channels TEXT NOT NULL DEFAULT '[]',
+                provider TEXT NOT NULL DEFAULT 'simulation',
+                notification_results TEXT NOT NULL DEFAULT '[]'
             )
             """
         )
+
+        emergency_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(emergency_alerts)").fetchall()
+        }
+
+        emergency_column_defs = {
+            "recipient_numbers": "TEXT NOT NULL DEFAULT '[]'",
+            "requested_channels": "TEXT NOT NULL DEFAULT '[]'",
+            "provider": "TEXT NOT NULL DEFAULT 'simulation'",
+            "notification_results": "TEXT NOT NULL DEFAULT '[]'",
+        }
+
+        for column_name, column_def in emergency_column_defs.items():
+            if column_name not in emergency_columns:
+                connection.execute(
+                    f"""
+                    ALTER TABLE emergency_alerts
+                    ADD COLUMN {column_name} {column_def}
+                    """
+                )
 
     connection.close()
 
@@ -297,6 +327,93 @@ def get_hazard_by_id(hazard_id):
     return serialize_hazard_row(row) if row else None
 
 
+def parse_recipient_numbers(raw_value):
+    if not raw_value:
+        return []
+
+    recipients = []
+
+    for part in re.split(r"[,\n;]+", raw_value):
+        cleaned = re.sub(r"[^\d+]", "", part.strip())
+
+        if not cleaned:
+            continue
+
+        if cleaned.startswith("00"):
+            cleaned = f"+{cleaned[2:]}"
+
+        if cleaned.startswith("+") and re.fullmatch(r"\+[1-9]\d{7,14}", cleaned):
+            recipients.append(cleaned)
+            continue
+
+        if re.fullmatch(r"[1-9]\d{7,14}", cleaned):
+            recipients.append(f"+{cleaned}")
+            continue
+
+        raise ValueError(
+            f"Use full mobile numbers with country code, like +919876543210. Invalid value: {part.strip()}"
+        )
+
+    return list(dict.fromkeys(recipients))
+
+
+def get_twilio_client():
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        raise RuntimeError(
+            "Twilio is not configured. Add TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN."
+        )
+
+    try:
+        from twilio.rest import Client
+    except ImportError as exc:
+        raise RuntimeError(
+            "Twilio dependency is missing on the server. Redeploy after installing requirements."
+        ) from exc
+
+    return Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+
+def build_alert_message_text(
+    road_location,
+    source_location,
+    incident_type,
+    severity,
+    notes,
+):
+    message = (
+        f"Find My Avenue alert: {severity.title()} {incident_type} reported near "
+        f"{road_location}. Source: {source_location}."
+    )
+
+    if notes:
+        message = f"{message} Notes: {notes[:120]}"
+
+    return message
+
+
+def build_call_twiml(alert_message):
+    try:
+        from twilio.twiml.voice_response import VoiceResponse
+    except ImportError as exc:
+        raise RuntimeError(
+            "Twilio voice helper is missing on the server. Redeploy after installing requirements."
+        ) from exc
+
+    response = VoiceResponse()
+    response.pause(length=1)
+    response.say(
+        "This is a Find My Avenue emergency test alert.",
+        voice="alice",
+    )
+    response.say(alert_message, voice="alice")
+    response.pause(length=1)
+    response.say(
+        "This was a manual test call from the project prototype.",
+        voice="alice",
+    )
+    return str(response)
+
+
 def build_emergency_services(incident_type, severity):
     services = []
 
@@ -319,9 +436,120 @@ def build_emergency_services(incident_type, severity):
     return services
 
 
+def deliver_real_notifications(
+    alert_message,
+    recipient_numbers,
+    send_sms,
+    send_call,
+):
+    client = get_twilio_client()
+    results = []
+
+    if send_sms and not TWILIO_SMS_FROM_NUMBER:
+        raise RuntimeError(
+            "Twilio SMS sender is missing. Add TWILIO_SMS_FROM_NUMBER."
+        )
+
+    if send_call and not TWILIO_VOICE_FROM_NUMBER:
+        raise RuntimeError(
+            "Twilio voice sender is missing. Add TWILIO_VOICE_FROM_NUMBER or TWILIO_SMS_FROM_NUMBER."
+        )
+
+    call_twiml = build_call_twiml(alert_message) if send_call else None
+
+    for number in recipient_numbers:
+        if send_sms:
+            try:
+                message = client.messages.create(
+                    body=alert_message,
+                    from_=TWILIO_SMS_FROM_NUMBER,
+                    to=number,
+                )
+                results.append(
+                    {
+                        "channel": "sms",
+                        "to": number,
+                        "provider": "twilio",
+                        "status": message.status or "queued",
+                        "sid": message.sid,
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "channel": "sms",
+                        "to": number,
+                        "provider": "twilio",
+                        "status": "failed",
+                        "error": str(exc)[:240],
+                    }
+                )
+
+        if send_call:
+            try:
+                call = client.calls.create(
+                    to=number,
+                    from_=TWILIO_VOICE_FROM_NUMBER,
+                    twiml=call_twiml,
+                )
+                results.append(
+                    {
+                        "channel": "call",
+                        "to": number,
+                        "provider": "twilio",
+                        "status": call.status or "queued",
+                        "sid": call.sid,
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "channel": "call",
+                        "to": number,
+                        "provider": "twilio",
+                        "status": "failed",
+                        "error": str(exc)[:240],
+                    }
+                )
+
+    return results
+
+
+def summarize_notification_results(results, send_sms, send_call):
+    if not send_sms and not send_call:
+        return "Simulation only. No real SMS or call was requested."
+
+    if not results:
+        return "No real notifications were attempted."
+
+    delivered = [
+        item for item in results if item.get("status") not in {"failed", "canceled"}
+    ]
+    failed = [item for item in results if item.get("status") == "failed"]
+    channels = []
+
+    if send_sms:
+        sms_count = sum(1 for item in delivered if item["channel"] == "sms")
+        channels.append(f"SMS attempted: {sms_count}")
+
+    if send_call:
+        call_count = sum(1 for item in delivered if item["channel"] == "call")
+        channels.append(f"Calls attempted: {call_count}")
+
+    if failed:
+        channels.append(f"Failures: {len(failed)}")
+
+    return " | ".join(channels)
+
+
 def serialize_emergency_row(row):
     data = dict(row)
     data["services_notified"] = json.loads(data["services_notified"] or "[]")
+    data["recipient_numbers"] = json.loads(data.get("recipient_numbers") or "[]")
+    data["requested_channels"] = json.loads(data.get("requested_channels") or "[]")
+    data["notification_results"] = json.loads(
+        data.get("notification_results") or "[]"
+    )
     data["latitude"] = round(float(data["latitude"]), 6)
     data["longitude"] = round(float(data["longitude"]), 6)
     data["source_location"] = (
@@ -342,14 +570,21 @@ def insert_emergency_alert(
     emergency_contact_phone,
     notes,
     linked_hazard_id,
+    recipient_numbers,
+    requested_channels,
+    provider,
+    notification_results,
 ):
     source_location = (source_location or road_location).strip()
     dispatch_status = ALERT_STATUS_BY_SEVERITY[severity]
-    alert_message = (
-        f"{severity.title()} {incident_type} alert near {road_location}. "
-        f"Source: {source_location}. "
-        f"{dispatch_status}."
+    alert_message = build_alert_message_text(
+        road_location,
+        source_location,
+        incident_type,
+        severity,
+        notes,
     )
+    alert_message = f"{alert_message} {dispatch_status}."
 
     connection = get_db_connection()
 
@@ -371,9 +606,13 @@ def insert_emergency_alert(
                 emergency_contact_phone,
                 notes,
                 linked_hazard_id,
-                alert_message
+                alert_message,
+                recipient_numbers,
+                requested_channels,
+                provider,
+                notification_results
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 utc_now_iso(),
@@ -391,6 +630,10 @@ def insert_emergency_alert(
                 notes or "",
                 linked_hazard_id,
                 alert_message,
+                json.dumps(recipient_numbers),
+                json.dumps(requested_channels),
+                provider,
+                json.dumps(notification_results),
             ),
         )
         alert_id = cursor.lastrowid
@@ -1066,6 +1309,9 @@ def emergency_api():
     notes = (data.get("notes") or "").strip()
     emergency_contact_name = (data.get("emergency_contact_name") or "").strip()
     emergency_contact_phone = (data.get("emergency_contact_phone") or "").strip()
+    raw_recipient_numbers = data.get("recipient_numbers") or ""
+    send_sms = bool(data.get("send_sms"))
+    send_call = bool(data.get("send_call"))
     linked_hazard_id = data.get("linked_hazard_id")
 
     if not road_location:
@@ -1084,6 +1330,7 @@ def emergency_api():
 
     hazard = None
     normalized_hazard_id = None
+    recipient_numbers = []
 
     if linked_hazard_id not in (None, "", "null"):
         try:
@@ -1096,7 +1343,48 @@ def emergency_api():
         if hazard is None:
             return jsonify({"error": "The selected hazard report was not found."}), 404
 
+    if send_sms or send_call:
+        try:
+            recipient_numbers = parse_recipient_numbers(raw_recipient_numbers)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        if not recipient_numbers:
+            return jsonify(
+                {
+                    "error": "Add at least one test mobile number to send a real SMS or call."
+                }
+            ), 400
+
     services_notified = build_emergency_services(incident_type, severity)
+    requested_channels = []
+
+    if send_sms:
+        requested_channels.append("sms")
+    if send_call:
+        requested_channels.append("call")
+
+    provider = "simulation"
+    notification_results = []
+
+    if requested_channels:
+        try:
+            notification_results = deliver_real_notifications(
+                build_alert_message_text(
+                    road_location,
+                    source_location,
+                    incident_type,
+                    severity,
+                    notes,
+                ),
+                recipient_numbers,
+                send_sms,
+                send_call,
+            )
+            provider = "twilio"
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 400
+
     alert = insert_emergency_alert(
         road_location,
         source_location,
@@ -1109,13 +1397,22 @@ def emergency_api():
         emergency_contact_phone,
         notes,
         normalized_hazard_id,
+        recipient_numbers,
+        requested_channels,
+        provider,
+        notification_results,
     )
 
     return jsonify(
         {
-            "message": "Emergency alert simulation created. Rescue services were marked as notified.",
+            "message": "Emergency alert created. Dispatch simulation was saved and any requested real notifications were attempted.",
             "alert": alert,
             "linked_hazard": hazard,
+            "delivery_summary": summarize_notification_results(
+                notification_results,
+                send_sms,
+                send_call,
+            ),
         }
     ), 201
 
