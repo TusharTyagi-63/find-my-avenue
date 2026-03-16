@@ -128,26 +128,27 @@ def geocode_location(place):
         return None
 
 
-def get_routes(start, end):
-    if not ORS_API_KEY:
-        raise RuntimeError("OpenRouteService API key is missing.")
+def extract_service_error(response, fallback):
+    if response is None:
+        return fallback
 
-    url = "https://api.openrouteservice.org/v2/directions/driving-car"
+    try:
+        payload = response.json()
+    except ValueError:
+        return fallback
 
-    body = {
-        "coordinates": [
-            [start[1], start[0]],
-            [end[1], end[0]],
-        ],
-        "alternative_routes": {"target_count": 3, "share_factor": 0.6},
-    }
+    error = payload.get("error") or payload.get("message")
 
-    headers = {"Authorization": ORS_API_KEY, "Content-Type": "application/json"}
+    if isinstance(error, dict):
+        return str(error.get("message") or fallback)
 
-    res = requests.post(url, json=body, headers=headers, timeout=20)
-    res.raise_for_status()
-    data = res.json()
+    if isinstance(error, list):
+        return "; ".join(str(item) for item in error) or fallback
 
+    return str(error or fallback)
+
+
+def build_route_results(data):
     routes = []
 
     for index, route_data in enumerate(data.get("routes", [])):
@@ -164,6 +165,49 @@ def get_routes(start, end):
         )
 
     return routes
+
+
+def get_routes(start, end):
+    if not ORS_API_KEY:
+        raise RuntimeError("OpenRouteService API key is missing.")
+
+    url = "https://api.openrouteservice.org/v2/directions/driving-car"
+    base_body = {
+        "coordinates": [
+            [start[1], start[0]],
+            [end[1], end[0]],
+        ]
+    }
+    attempts = [
+        {
+            **base_body,
+            "alternative_routes": {"target_count": 3, "share_factor": 0.6},
+        },
+        base_body,
+    ]
+    headers = {"Authorization": ORS_API_KEY, "Content-Type": "application/json"}
+    last_error = "Route service could not generate a route."
+
+    for body in attempts:
+        try:
+            res = requests.post(url, json=body, headers=headers, timeout=30)
+            res.raise_for_status()
+            routes = build_route_results(res.json())
+
+            if routes:
+                return routes
+
+            last_error = "No routes were returned for that trip."
+        except requests.HTTPError as exc:
+            last_error = extract_service_error(
+                exc.response,
+                "Route service rejected the request.",
+            )
+        except requests.RequestException:
+            app.logger.exception("Route lookup request failed.")
+            last_error = "Route service could not be reached."
+
+    raise RuntimeError(last_error)
 
 
 def analyze_saved_video(job_id, path):
@@ -244,12 +288,13 @@ def analyze_saved_video(job_id, path):
         )
     except ValueError as exc:
         set_analysis_job(job_id, status="failed", error=str(exc))
-    except Exception:
+    except Exception as exc:
         app.logger.exception("Video analysis failed.")
+        message = str(exc).strip() or exc.__class__.__name__
         set_analysis_job(
             job_id,
             status="failed",
-            error="Video analysis failed on the server. Try a shorter MP4 clip.",
+            error=f"Server error during video analysis: {message[:240]}",
         )
     finally:
         if cap is not None:
@@ -316,10 +361,9 @@ def route_api():
 
     try:
         routes = get_routes(start, end)
-    except requests.RequestException:
-        app.logger.exception("Route lookup failed.")
-        return jsonify({"error": "Route lookup failed. Please try again."}), 502
-    except (KeyError, TypeError, ValueError, RuntimeError):
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 502
+    except (KeyError, TypeError, ValueError):
         app.logger.exception("Unexpected route lookup error.")
         return jsonify({"error": "Could not generate routes right now."}), 500
 
