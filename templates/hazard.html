@@ -18,45 +18,89 @@
 
 </div>
 
-<div style="text-align:center;margin-top:40px;">
+<div class="page-shell">
 
+<div class="panel">
 <h2>Upload Road Video</h2>
+<p class="helper-text">Upload a short road clip in mp4, mov, avi, mkv, webm, or m4v format.</p>
 
 <form id="uploadForm">
 
-<input type="file" name="video" required>
+<input type="file" name="video" accept="video/*" required>
 
 <br><br>
 
-<button type="submit">Analyze</button>
+<button id="analyzeButton" type="submit">Analyze</button>
 
 </form>
 
 <br>
 
-<div id="result"></div>
+<div id="result" class="status-box">Choose a video and click Analyze.</div>
+
+</div>
 
 </div>
 
 <script>
 
-document.getElementById("uploadForm").onsubmit = async function(e){
+var uploadForm = document.getElementById("uploadForm");
+var result = document.getElementById("result");
+var analyzeButton = document.getElementById("analyzeButton");
+
+function showResult(message, state) {
+result.className = "status-box " + state;
+result.innerHTML = message;
+}
+
+uploadForm.onsubmit = async function(e){
 
 e.preventDefault();
 
-let form=new FormData(this);
+let fileInput = this.querySelector('input[name="video"]');
 
+if (!fileInput.files.length) {
+showResult("Choose a video file before analyzing.", "error");
+return;
+}
+
+let form = new FormData(this);
+
+analyzeButton.disabled = true;
+analyzeButton.textContent = "Analyzing...";
+showResult("Uploading and analyzing your video. This can take a little while for larger clips.", "loading");
+
+try {
 let res = await fetch("/analyze_video",{
 method:"POST",
 body:form
 });
 
-let data = await res.json();
+let data;
 
-document.getElementById("result").innerHTML =
-"Detected Hazards: "+data.hazards+
-"<br>Risk Score: "+data.risk_score+
-"<br>Status: "+data.status;
+try {
+data = await res.json();
+} catch (error) {
+throw new Error("The server returned an unexpected response.");
+}
+
+if (!res.ok) {
+throw new Error(data.error || "Video analysis failed.");
+}
+
+showResult(
+"Detected Vehicles: " + data.hazards +
+"<br>Frames Analyzed: " + data.frames_analyzed +
+"<br>Risk Score: " + data.risk_score +
+"<br>Status: " + data.status,
+"success"
+);
+} catch (error) {
+showResult(error.message, "error");
+} finally {
+analyzeButton.disabled = false;
+analyzeButton.textContent = "Analyze";
+}
 
 }
 

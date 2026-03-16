@@ -1,17 +1,25 @@
 import os
-import requests
-import polyline
+import tempfile
+import uuid
+
 import cv2
-from flask import Flask, render_template, request, jsonify
+import polyline
+import requests
 from dotenv import load_dotenv
+from flask import Flask, Response, jsonify, render_template, request
+from werkzeug.utils import secure_filename
 
 load_dotenv()
 
-os.environ["YOLO_CONFIG_DIR"] = "/tmp"
+os.environ.setdefault(
+    "YOLO_CONFIG_DIR", os.path.join(tempfile.gettempdir(), "ultralytics")
+)
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "static/uploads"
+UPLOAD_FOLDER = os.path.join("static", "uploads")
+ROUTE_COLORS = ["#38bdf8", "#22c55e", "#f59e0b"]
+ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 ORS_API_KEY = os.getenv("ORS_API_KEY")
@@ -24,121 +32,132 @@ def get_model():
     global model
     if model is None:
         from ultralytics import YOLO
+
         model = YOLO("yolov8n.pt")
     return model
 
 
+def allowed_video_file(filename):
+    return (
+        "." in filename
+        and filename.rsplit(".", 1)[1].lower() in ALLOWED_VIDEO_EXTENSIONS
+    )
+
+
+def resize_frame(frame, max_width=720):
+    height, width = frame.shape[:2]
+
+    if width <= max_width:
+        return frame
+
+    scale = max_width / width
+    new_height = max(1, int(height * scale))
+
+    return cv2.resize(frame, (max_width, new_height))
+
+
 def parse_location(text):
+    if not text:
+        return None
+
+    text = text.strip()
 
     if "," in text:
-        lat, lon = text.split(",")
-        return float(lat), float(lon)
+        parts = [part.strip() for part in text.split(",", 1)]
+
+        if len(parts) == 2:
+            try:
+                return float(parts[0]), float(parts[1])
+            except ValueError:
+                return None
 
     return geocode_location(text)
 
 
 def geocode_location(place):
-
-    url = f"https://api.openrouteservice.org/geocode/search?api_key={ORS_API_KEY}&text={place}&size=1"
+    if not ORS_API_KEY:
+        return None
 
     try:
-        res = requests.get(url)
+        res = requests.get(
+            "https://api.openrouteservice.org/geocode/search",
+            params={"api_key": ORS_API_KEY, "text": place, "size": 1},
+            timeout=15,
+        )
+        res.raise_for_status()
         data = res.json()
+        features = data.get("features", [])
 
-        coords = data["features"][0]["geometry"]["coordinates"]
+        if not features:
+            return None
 
+        coords = features[0]["geometry"]["coordinates"]
         return coords[1], coords[0]
-
-    except:
+    except requests.RequestException:
+        return None
+    except (KeyError, IndexError, TypeError, ValueError):
         return None
 
 
-def get_traffic(lat, lon):
-
-    try:
-
-        url = f"https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point={lat},{lon}&key={TOMTOM_API_KEY}"
-
-        res = requests.get(url)
-        data = res.json()
-
-        current = data["flowSegmentData"]["currentSpeed"]
-        free = data["flowSegmentData"]["freeFlowSpeed"]
-
-        congestion = max(0, min(100, int((1 - current/free) * 100)))
-
-        return congestion
-
-    except:
-        return 0
-
-
 def get_routes(start, end):
+    if not ORS_API_KEY:
+        raise RuntimeError("OpenRouteService API key is missing.")
 
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
 
     body = {
-        "coordinates":[
-            [start[1],start[0]],
-            [end[1],end[0]]
+        "coordinates": [
+            [start[1], start[0]],
+            [end[1], end[0]],
         ],
-        "alternative_routes":{
-            "target_count":3,
-            "share_factor":0.6
-        }
+        "alternative_routes": {"target_count": 3, "share_factor": 0.6},
     }
 
-    headers={
-        "Authorization":ORS_API_KEY,
-        "Content-Type":"application/json"
-    }
+    headers = {"Authorization": ORS_API_KEY, "Content-Type": "application/json"}
 
-    res=requests.post(url,json=body,headers=headers)
-    data=res.json()
+    res = requests.post(url, json=body, headers=headers, timeout=20)
+    res.raise_for_status()
+    data = res.json()
 
-    routes=[]
+    routes = []
 
-    for r in data["routes"]:
+    for index, route_data in enumerate(data.get("routes", [])):
+        decoded = polyline.decode(route_data["geometry"])
+        summary = route_data.get("summary", {})
 
-        decoded=polyline.decode(r["geometry"])
-
-        checkpoints=[
-            decoded[0],
-            decoded[len(decoded)//4],
-            decoded[len(decoded)//2],
-            decoded[(len(decoded)*3)//4],
-            decoded[-1]
-        ]
-
-        traffic_values=[]
-
-        for point in checkpoints:
-
-            lat,lon=point
-            traffic=get_traffic(lat,lon)
-
-            traffic_values.append(traffic)
-
-        avg_traffic=sum(traffic_values)/len(traffic_values)
-
-        if avg_traffic<30:
-            color="green"
-        elif avg_traffic<60:
-            color="yellow"
-        else:
-            color="red"
-
-        summary=r["summary"]
-
-        routes.append({
-            "coords":decoded,
-            "distance":round(summary["distance"]/1000,2),
-            "duration":round(summary["duration"]/60,2),
-            "traffic":round(avg_traffic,1),
-            "color":color
-        })
+        routes.append(
+            {
+                "coords": decoded,
+                "distance": round(summary.get("distance", 0) / 1000, 2),
+                "duration": round(summary.get("duration", 0) / 60, 2),
+                "color": ROUTE_COLORS[index % len(ROUTE_COLORS)],
+            }
+        )
 
     return routes
+
+
+@app.route("/api/traffic/tile/<int:z>/<int:x>/<int:y>.png")
+def traffic_tile(z, x, y):
+    if not TOMTOM_API_KEY:
+        return ("Traffic service is not configured.", 503)
+
+    try:
+        res = requests.get(
+            f"https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png",
+            params={"key": TOMTOM_API_KEY, "tileSize": 256},
+            timeout=20,
+        )
+        res.raise_for_status()
+    except requests.RequestException:
+        app.logger.exception("Traffic tile request failed for %s/%s/%s", z, x, y)
+        return ("Traffic tile unavailable.", 502)
+
+    return Response(
+        res.content,
+        mimetype=res.headers.get("Content-Type", "image/png"),
+        headers={"Cache-Control": res.headers.get("Cache-Control", "no-store")},
+    )
 
 
 @app.route("/")
@@ -158,74 +177,133 @@ def hazard():
 
 @app.route("/api/route",methods=["POST"])
 def route_api():
+    data = request.get_json(silent=True) or {}
+    start = parse_location(data.get("start"))
+    end = parse_location(data.get("end"))
 
-    data=request.json
+    if start is None or end is None:
+        return jsonify({"error": "Enter valid start and end locations."}), 400
 
-    start=parse_location(data["start"])
-    end=parse_location(data["end"])
+    try:
+        routes = get_routes(start, end)
+    except requests.RequestException:
+        app.logger.exception("Route lookup failed.")
+        return jsonify({"error": "Route lookup failed. Please try again."}), 502
+    except (KeyError, TypeError, ValueError, RuntimeError):
+        app.logger.exception("Unexpected route lookup error.")
+        return jsonify({"error": "Could not generate routes right now."}), 500
 
-    routes=get_routes(start,end)
+    if not routes:
+        return jsonify({"error": "No routes were found for that trip."}), 404
 
-    return jsonify({"routes":routes})
+    return jsonify({"routes": routes})
 
 
 @app.route("/analyze_video",methods=["POST"])
 def analyze_video():
+    file = request.files.get("video")
 
-    file=request.files["video"]
+    if file is None or not file.filename:
+        return jsonify({"error": "Choose a video file before analyzing."}), 400
 
-    path=os.path.join(UPLOAD_FOLDER,file.filename)
+    if not allowed_video_file(file.filename):
+        return jsonify(
+            {"error": "Upload an mp4, mov, avi, mkv, webm, or m4v video file."}
+        ), 400
 
-    file.save(path)
+    filename = secure_filename(file.filename)
+    extension = os.path.splitext(filename)[1].lower() or ".mp4"
+    path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}{extension}")
+    cap = None
 
-    cap=cv2.VideoCapture(path)
+    try:
+        file.save(path)
+        cap = cv2.VideoCapture(path)
 
-    model=get_model()
+        if not cap.isOpened():
+            return jsonify({"error": "The server could not read that video file."}), 400
 
-    hazards=0
-    frame_count=0
+        detector = get_model()
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = fps if fps and fps > 0 else 24
+        frame_interval = max(int(round(fps)), 12)
+        max_frames = 12
+        frame_index = 0
+        sampled_frames = 0
+        hazards = 0
+        vehicle_classes = {"car", "truck", "bus", "motorcycle"}
 
-    vehicle_classes=["car","truck","bus","motorcycle"]
+        while sampled_frames < max_frames:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ret, frame = cap.read()
 
-    while True:
+            if not ret:
+                break
 
-        ret,frame=cap.read()
+            sampled_frames += 1
+            frame_index += frame_interval
+            frame = resize_frame(frame)
+            results = detector.predict(
+                frame, imgsz=640, conf=0.25, verbose=False, device="cpu"
+            )
 
-        if not ret:
-            break
+            for result in results:
+                if result.boxes is None:
+                    continue
 
-        frame_count+=1
+                for box in result.boxes:
+                    cls = int(box.cls[0])
 
-        if frame_count%10!=0:
-            continue
+                    if isinstance(detector.names, dict):
+                        label = detector.names.get(cls, str(cls))
+                    else:
+                        label = detector.names[cls]
 
-        results=model(frame)
+                    if label in vehicle_classes:
+                        hazards += 1
 
-        for r in results:
-            for box in r.boxes:
+        if sampled_frames == 0:
+            return jsonify(
+                {"error": "No readable frames were found in the uploaded video."}
+            ), 400
 
-                cls=int(box.cls[0])
-                label=model.names[cls]
+        average_vehicle_density = hazards / sampled_frames
+        risk_score = min(100, int(round(average_vehicle_density * 20)))
 
-                if label in vehicle_classes:
-                    hazards+=1
+        if risk_score < 30:
+            status = "Safe Route"
+        elif risk_score < 60:
+            status = "Moderate Risk"
+        else:
+            status = "High Risk Route"
 
-    cap.release()
+        return jsonify(
+            {
+                "hazards": hazards,
+                "risk_score": risk_score,
+                "status": status,
+                "frames_analyzed": sampled_frames,
+            }
+        )
+    except Exception:
+        app.logger.exception("Video analysis failed.")
+        return jsonify(
+            {
+                "error": (
+                    "Video analysis failed on the server. Try a shorter MP4 clip after "
+                    "redeploying these changes."
+                )
+            }
+        ), 500
+    finally:
+        if cap is not None:
+            cap.release()
 
-    risk_score=min(100,hazards*2)
-
-    if risk_score<30:
-        status="Safe Route"
-    elif risk_score<60:
-        status="Moderate Risk"
-    else:
-        status="High Risk Route"
-
-    return jsonify({
-        "hazards":hazards,
-        "risk_score":risk_score,
-        "status":status
-    })
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                app.logger.warning("Could not remove uploaded file: %s", path)
 
 
 if __name__=="__main__":
