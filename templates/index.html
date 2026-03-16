@@ -5,19 +5,33 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 
-<body style="text-align:center;padding-top:100px;">
+<body>
 
+<div class="page-shell column-layout">
+
+<div class="panel panel-wide">
 <h1>Find My Avenue</h1>
+<p class="helper-text">A hazard-aware route planning prototype that combines live traffic viewing, saved road hazard reports, and road-video analysis.</p>
 
+<div class="form-grid">
+<div class="report-card">
+<strong>Safer Routing Dashboard</strong>
+<div class="report-meta">Compare alternate routes, turn on live traffic, and score each path against the saved road hazards collected from earlier analyses.</div>
 <br>
+<a href="/dashboard"><button>Open Dashboard</button></a>
+</div>
 
-<a href="/dashboard">
-<button>Open Dashboard</button>
-</a>
+<div class="report-card">
+<strong>Road Hazard Detection</strong>
+<div class="report-meta">Upload road clips, tag the road location, and build a growing hazard map that can influence later route recommendations.</div>
+<br>
+<a href="/hazard"><button>Analyze Road Clip</button></a>
+</div>
+</div>
 
-<a href="/hazard">
-<button>Hazard Detection</button>
-</a>
+</div>
+
+</div>
 
 </body>
 </html>

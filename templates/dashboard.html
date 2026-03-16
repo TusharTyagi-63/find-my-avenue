@@ -26,7 +26,7 @@
 
 </div>
 
-<div id="summaryBar">Turn on Traffic to color the live road network on the map.</div>
+<div id="summaryBar">Routes now combine live traffic viewing with saved road hazard reports from analyzed clips.</div>
 <div id="map"></div>
 
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
@@ -38,6 +38,7 @@ var map = L.map('map').setView([28.6,77.2],6);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
 var lines = [];
+var hazardMarkers = [];
 var trafficLayer = L.tileLayer('/api/traffic/tile/{z}/{x}/{y}.png', {
 opacity: 0.9,
 attribution: 'Traffic \u00a9 TomTom'
@@ -45,42 +46,107 @@ attribution: 'Traffic \u00a9 TomTom'
 var trafficVisible = false;
 var startMarker = null;
 
-function buildRouteStyle(route, index){
+function buildRouteStyle(route, index) {
 
 let dashArray = null;
 
-if (index === 1) {
+if (route.route_rank === 2) {
 dashArray = "10 10";
-} else if (index === 2) {
+} else if (route.route_rank === 3) {
 dashArray = "5 10";
 }
 
 return {
-color:route.color,
-weight:trafficVisible ? 4 : 6,
-opacity:trafficVisible ? 0.4 : 0.9,
-dashArray:dashArray
+color: route.color,
+weight: route.recommended ? (trafficVisible ? 5 : 7) : (trafficVisible ? 4 : 5),
+opacity: route.recommended ? (trafficVisible ? 0.7 : 0.95) : (trafficVisible ? 0.35 : 0.82),
+dashArray: dashArray
 };
 
 }
 
 
-function refreshRouteStyles(){
+function refreshRouteStyles() {
 
-lines.forEach(function(line, index){
-line.setStyle(buildRouteStyle(line.routeData, index));
+lines.forEach(function(line) {
+line.setStyle(buildRouteStyle(line.routeData));
 });
 
 }
 
-function getLocation(){
+
+function getSeverityColor(severity) {
+if (severity === "high") {
+return "#ef4444";
+}
+
+if (severity === "medium") {
+return "#f59e0b";
+}
+
+return "#22c55e";
+}
+
+
+function clearHazards() {
+hazardMarkers.forEach(function(marker) {
+map.removeLayer(marker);
+});
+
+hazardMarkers = [];
+}
+
+
+function renderHazards(hazards) {
+clearHazards();
+
+hazards.forEach(function(hazard) {
+let marker = L.circleMarker([hazard.latitude, hazard.longitude], {
+radius: hazard.severity === "high" ? 8 : hazard.severity === "medium" ? 7 : 6,
+color: getSeverityColor(hazard.severity),
+fillColor: getSeverityColor(hazard.severity),
+fillOpacity: 0.85,
+weight: 2
+}).addTo(map);
+
+marker.bindPopup(
+"<strong>" + hazard.location_label + "</strong><br>" +
+"Hazard: " + hazard.hazard_type + "<br>" +
+"Severity: " + hazard.severity + "<br>" +
+"Risk Score: " + hazard.risk_score + "<br>" +
+"Detections: " + hazard.hazard_count
+);
+
+hazardMarkers.push(marker);
+});
+}
+
+
+async function loadHazards() {
+
+try {
+let res = await fetch("/api/hazards?limit=100");
+let data = await res.json();
+
+if (!res.ok) {
+return;
+}
+
+renderHazards(data.hazards || []);
+} catch (error) {
+}
+
+}
+
+
+function getLocation() {
 
 if (!navigator.geolocation) {
 document.getElementById("summaryBar").innerHTML = "Geolocation is not supported in this browser.";
 return;
 }
 
-navigator.geolocation.getCurrentPosition(function(pos){
+navigator.geolocation.getCurrentPosition(function(pos) {
 
 var lat = pos.coords.latitude;
 var lon = pos.coords.longitude;
@@ -95,20 +161,20 @@ map.removeLayer(startMarker);
 
 startMarker = L.marker([lat,lon]).addTo(map);
 
-}, function(){
+}, function() {
 document.getElementById("summaryBar").innerHTML = "Could not fetch your current location.";
 });
 }
 
 
-function toggleTraffic(){
+function toggleTraffic() {
 
 let button = document.getElementById("trafficButton");
 
 if (trafficVisible) {
 map.removeLayer(trafficLayer);
 button.textContent = "Show Traffic";
-document.getElementById("summaryBar").innerHTML = "Traffic overlay hidden. Click Show Traffic to color the live road network.";
+document.getElementById("summaryBar").innerHTML = "Traffic overlay hidden. Hazard markers and safety-ranked routes remain visible.";
 trafficVisible = false;
 refreshRouteStyles();
 return;
@@ -116,14 +182,14 @@ return;
 
 trafficLayer.addTo(map);
 button.textContent = "Hide Traffic";
-document.getElementById("summaryBar").innerHTML = "Traffic overlay is live. Green roads are moving well and red roads are slower.";
+document.getElementById("summaryBar").innerHTML = "Traffic overlay is live. Route ranking still comes from saved hazard reports near each path.";
 trafficVisible = true;
 refreshRouteStyles();
 
 }
 
 
-async function getRoute(){
+async function getRoute() {
 
 let start = document.getElementById("start").value;
 let end = document.getElementById("end").value;
@@ -134,7 +200,7 @@ summaryBar.innerHTML = "Enter both a start and an end location.";
 return;
 }
 
-summaryBar.innerHTML = "Finding routes...";
+summaryBar.innerHTML = "Finding safer routes...";
 
 try {
 let res = await fetch("/api/route",{
@@ -151,7 +217,7 @@ data = await res.json();
 data = {};
 }
 
-lines.forEach(function(line){
+lines.forEach(function(line) {
 map.removeLayer(line);
 });
 lines = [];
@@ -162,29 +228,52 @@ return;
 }
 
 let summary = [];
+let recommendedLine = null;
 
-data.routes.forEach(function(route, index){
+data.routes.forEach(function(route, index) {
 
 let poly = L.polyline(route.coords, buildRouteStyle(route, index)).addTo(map);
 poly.routeData = route;
 
+if (route.recommended) {
+recommendedLine = poly;
+}
+
 lines.push(poly);
 
-summary.push("Route " + (index + 1) + " -> Distance " + route.distance + " km | Duration " + route.duration + " min");
+let lead = route.recommended ? "Recommended Route " : "Route ";
+summary.push(
+lead + (index + 1) +
+" -> Distance " + route.distance + " km" +
+" | Duration " + route.duration + " min" +
+" | Safety " + route.safety_score +
+" | Nearby Hazards " + route.hazard_count +
+" | " + route.safety_label
+);
 
 });
 
-if (lines.length) {
-map.fitBounds(lines[0].getBounds());
+if (recommendedLine) {
+map.fitBounds(recommendedLine.getBounds(), {padding:[20,20]});
+} else if (lines.length) {
+map.fitBounds(lines[0].getBounds(), {padding:[20,20]});
+}
+
+if (summary.length) {
 summaryBar.innerHTML = summary.join("<br>");
 } else {
 summaryBar.innerHTML = "No routes were returned for this trip.";
 }
+
+loadHazards();
 } catch (error) {
 summaryBar.innerHTML = "Could not load routes right now.";
 }
 
 }
+
+
+loadHazards();
 
 </script>
 

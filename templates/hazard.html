@@ -18,26 +18,53 @@
 
 </div>
 
-<div class="page-shell">
+<div class="page-shell column-layout">
 
-<div class="panel">
-<h2>Upload Road Video</h2>
-<p class="helper-text">Upload a short road clip under 50 MB in mp4, mov, avi, mkv, webm, or m4v format.</p>
+<div class="panel panel-wide">
+<h2>Road Hazard Detection</h2>
+<p class="helper-text">Upload a short road clip under 50 MB, tag the location, and the app will save detected hazards for safer future routing.</p>
 
 <form id="uploadForm">
 
+<div class="form-grid">
+<label class="field-group">
+<span>Road Location</span>
+<input id="locationInput" type="text" name="location" placeholder="e.g. Sambhal, UP or 28.67,78.49" required>
+</label>
+
+<div class="field-group button-group">
+<span>&nbsp;</span>
+<button type="button" onclick="getCurrentLocation()">Use My Location</button>
+</div>
+
+<label class="field-group field-span">
+<span>Road Video</span>
 <input type="file" name="video" accept="video/*" required>
+</label>
 
-<br><br>
-
-<button id="analyzeButton" type="submit">Analyze</button>
+<label class="field-group field-span">
+<span>Notes (Optional)</span>
+<textarea name="notes" rows="3" placeholder="Short note about the road, potholes, flooding, debris, or anything visible in the clip."></textarea>
+</label>
+<div class="field-group button-group field-span">
+<button id="analyzeButton" type="submit">Analyze And Save Hazard</button>
+</div>
+</div>
 
 </form>
 
-<br>
+<div id="result" class="status-box">Add a road location, upload a short clip, and start analysis.</div>
 
-<div id="result" class="status-box">Choose a video and click Analyze.</div>
+</div>
 
+<div class="panel panel-wide">
+<div class="section-head">
+<h3>Saved Hazard Reports</h3>
+<button type="button" onclick="loadReports()">Refresh</button>
+</div>
+<div id="reportList" class="report-list">
+<div class="empty-state">Loading saved reports...</div>
+</div>
 </div>
 
 </div>
@@ -47,6 +74,8 @@
 var uploadForm = document.getElementById("uploadForm");
 var result = document.getElementById("result");
 var analyzeButton = document.getElementById("analyzeButton");
+var locationInput = document.getElementById("locationInput");
+var reportList = document.getElementById("reportList");
 var pollHandle = null;
 
 function showResult(message, state) {
@@ -65,6 +94,19 @@ function cleanServerText(text) {
 return text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function escapeHtml(value) {
+return String(value)
+.replace(/&/g, "&amp;")
+.replace(/</g, "&lt;")
+.replace(/>/g, "&gt;")
+.replace(/\"/g, "&quot;")
+.replace(/'/g, "&#39;");
+}
+
+function formatBreakdown(breakdown) {
+return "Low " + (breakdown.low || 0) + " | Medium " + (breakdown.medium || 0) + " | High " + (breakdown.high || 0);
+}
+
 async function readPayload(res) {
 let text = await res.text();
 
@@ -79,6 +121,59 @@ return {raw_text: cleanServerText(text)};
 }
 }
 
+function renderReports(hazards) {
+if (!hazards.length) {
+reportList.innerHTML = '<div class="empty-state">No saved hazard reports yet. Analyze a road clip to seed the hazard map.</div>';
+return;
+}
+
+reportList.innerHTML = hazards.map(function(hazard) {
+return `
+<article class="report-card">
+<div class="card-top">
+<strong>${escapeHtml(hazard.location_label)}</strong>
+<span class="tag ${escapeHtml(hazard.severity)}">${escapeHtml(hazard.severity)}</span>
+</div>
+<div class="report-meta">${escapeHtml(hazard.hazard_type)} | Risk ${hazard.risk_score} | Detections ${hazard.hazard_count}</div>
+<div class="report-meta">${formatBreakdown(hazard.severity_breakdown)}</div>
+<div class="report-meta">${escapeHtml(hazard.created_at)}</div>
+${hazard.notes ? `<div class="report-note">${escapeHtml(hazard.notes)}</div>` : ''}
+</article>
+`;
+}).join("");
+}
+
+async function loadReports() {
+reportList.innerHTML = '<div class="empty-state">Loading saved reports...</div>';
+
+try {
+let res = await fetch("/api/hazards?limit=8");
+let data = await readPayload(res);
+
+if (!res.ok) {
+throw new Error(data.error || "Could not load saved hazard reports.");
+}
+
+renderReports(data.hazards || []);
+} catch (error) {
+reportList.innerHTML = '<div class="empty-state">' + escapeHtml(error.message) + '</div>';
+}
+}
+
+function getCurrentLocation() {
+if (!navigator.geolocation) {
+showResult("Geolocation is not supported in this browser.", "error");
+return;
+}
+
+navigator.geolocation.getCurrentPosition(function(pos) {
+locationInput.value = pos.coords.latitude + "," + pos.coords.longitude;
+showResult("Current location added. Upload a road clip when you are ready.", "success");
+}, function() {
+showResult("Could not fetch your current location.", "error");
+});
+}
+
 async function pollAnalysis(jobId) {
 let res = await fetch("/analyze_video/" + jobId);
 let data = await readPayload(res);
@@ -88,20 +183,29 @@ throw new Error(data.error || ("Could not read analysis status (" + res.status +
 }
 
 if (data.status === "processing") {
-showResult(data.message || "Still analyzing your video...", "loading");
+showResult(data.message || "Still analyzing your road clip...", "loading");
 return;
 }
 
 stopPolling();
 
 if (data.status === "completed" && data.result) {
+let reportMessage = data.result.record
+? "<br>Saved Hazard Report: #" + data.result.record.id + " at " + escapeHtml(data.result.record.location_label)
+: "<br>No strong road hazard was saved from this clip.";
+
 showResult(
-"Detected Vehicles: " + data.result.hazards +
+"Detected Road Hazards: " + data.result.hazard_count +
 "<br>Frames Analyzed: " + data.result.frames_analyzed +
 "<br>Risk Score: " + data.result.risk_score +
-"<br>Status: " + data.result.status,
+"<br>Status: " + escapeHtml(data.result.status) +
+"<br>Dominant Hazard: " + escapeHtml(data.result.dominant_hazard) +
+"<br>Severity Mix: " + formatBreakdown(data.result.severity_breakdown) +
+reportMessage,
 "success"
 );
+
+loadReports();
 return;
 }
 
@@ -113,15 +217,20 @@ return;
 showResult("The server returned an unknown analysis status.", "error");
 }
 
-uploadForm.onsubmit = async function(e){
+uploadForm.onsubmit = async function(e) {
 
 e.preventDefault();
 stopPolling();
 
 let fileInput = this.querySelector('input[name="video"]');
 
+if (!locationInput.value.trim()) {
+showResult("Add the road location before analyzing so the result can be used for routing.", "error");
+return;
+}
+
 if (!fileInput.files.length) {
-showResult("Choose a video file before analyzing.", "error");
+showResult("Choose a road video before analyzing.", "error");
 return;
 }
 
@@ -129,12 +238,12 @@ let form = new FormData(this);
 
 analyzeButton.disabled = true;
 analyzeButton.textContent = "Analyzing...";
-showResult("Uploading and analyzing your video. This can take a little while for larger clips.", "loading");
+showResult("Uploading the road clip and starting hazard analysis...", "loading");
 
 try {
-let res = await fetch("/analyze_video",{
-method:"POST",
-body:form
+let res = await fetch("/analyze_video", {
+method: "POST",
+body: form
 });
 
 let data = await readPayload(res);
@@ -147,38 +256,30 @@ throw new Error("Request failed (" + res.status + "). " + data.raw_text);
 throw new Error(data.error || ("Video analysis failed (" + res.status + ")."));
 }
 
-if (data.job_id) {
+if (!data.job_id) {
+throw new Error("The server did not return an analysis job.");
+}
+
 showResult(data.message || "Upload complete. Analysis started.", "loading");
-pollHandle = setInterval(function(){
-pollAnalysis(data.job_id).catch(function(error){
+
+pollHandle = setInterval(function() {
+pollAnalysis(data.job_id).catch(function(error) {
 stopPolling();
 showResult(error.message, "error");
 });
 }, 2000);
+
 await pollAnalysis(data.job_id);
-return;
-}
-
-if (typeof data.hazards !== "undefined") {
-showResult(
-"Detected Vehicles: " + data.hazards +
-"<br>Frames Analyzed: " + data.frames_analyzed +
-"<br>Risk Score: " + data.risk_score +
-"<br>Status: " + data.status,
-"success"
-);
-return;
-}
-
-throw new Error("The server did not return a usable analysis result.");
 } catch (error) {
 showResult(error.message, "error");
 } finally {
 analyzeButton.disabled = false;
-analyzeButton.textContent = "Analyze";
+analyzeButton.textContent = "Analyze And Save Hazard";
 }
 
-}
+};
+
+loadReports();
 
 </script>
 

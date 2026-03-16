@@ -1,9 +1,14 @@
+import json
+import math
 import os
+import sqlite3
 import tempfile
 import threading
 import uuid
+from datetime import datetime, timezone
 
 import cv2
+import numpy as np
 import polyline
 import requests
 from dotenv import load_dotenv
@@ -16,13 +21,23 @@ os.environ.setdefault(
     "YOLO_CONFIG_DIR", os.path.join(tempfile.gettempdir(), "ultralytics")
 )
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INSTANCE_FOLDER = os.path.join(BASE_DIR, "instance")
+DATABASE_PATH = os.path.join(INSTANCE_FOLDER, "find_my_avenue.db")
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "uploads")
+
+HAZARD_INFLUENCE_KM = 0.4
+ROUTE_COLORS = ["#38bdf8", "#6366f1", "#94a3b8"]
+ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
+SEVERITY_WEIGHTS = {"low": 1.0, "medium": 2.4, "high": 4.0}
+SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3}
+CUSTOM_HAZARD_MODEL_PATH = os.getenv("ROAD_HAZARD_MODEL_PATH")
+
+os.makedirs(INSTANCE_FOLDER, exist_ok=True)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
-
-UPLOAD_FOLDER = os.path.join("static", "uploads")
-ROUTE_COLORS = ["#2563eb", "#6366f1", "#94a3b8"]
-ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 ORS_API_KEY = os.getenv("ORS_API_KEY")
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
@@ -32,13 +47,46 @@ analysis_jobs = {}
 analysis_lock = threading.Lock()
 
 
-def get_model():
-    global model
-    if model is None:
-        from ultralytics import YOLO
+def get_db_connection():
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
 
-        model = YOLO("yolov8n.pt")
-    return model
+
+def init_db():
+    connection = get_db_connection()
+
+    with connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hazard_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                location_label TEXT NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                hazard_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                risk_score INTEGER NOT NULL,
+                hazard_count INTEGER NOT NULL,
+                frames_analyzed INTEGER NOT NULL,
+                notes TEXT,
+                severity_breakdown TEXT NOT NULL,
+                hazard_breakdown TEXT NOT NULL
+            )
+            """
+        )
+
+    connection.close()
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_hazard_type(label):
+    return label.replace("_", " ").strip().lower()
 
 
 def allowed_video_file(filename):
@@ -60,6 +108,20 @@ def resize_frame(frame, max_width=720):
     return cv2.resize(frame, (max_width, new_height))
 
 
+def get_model():
+    global model
+
+    if not CUSTOM_HAZARD_MODEL_PATH:
+        return None
+
+    if model is None:
+        from ultralytics import YOLO
+
+        model = YOLO(CUSTOM_HAZARD_MODEL_PATH)
+
+    return model
+
+
 def set_analysis_job(job_id, **values):
     with analysis_lock:
         analysis_jobs.setdefault(job_id, {}).update(values)
@@ -71,18 +133,84 @@ def get_analysis_job(job_id):
         return dict(job) if job is not None else None
 
 
-def build_risk_status(hazards, sampled_frames):
-    average_vehicle_density = hazards / sampled_frames
-    risk_score = min(100, int(round(average_vehicle_density * 20)))
+def insert_hazard_record(
+    location_label,
+    coordinates,
+    summary,
+    notes,
+):
+    connection = get_db_connection()
 
-    if risk_score < 30:
-        status = "Safe Route"
-    elif risk_score < 60:
-        status = "Moderate Risk"
-    else:
-        status = "High Risk Route"
+    with connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO hazard_records (
+                created_at,
+                location_label,
+                latitude,
+                longitude,
+                hazard_type,
+                severity,
+                confidence,
+                risk_score,
+                hazard_count,
+                frames_analyzed,
+                notes,
+                severity_breakdown,
+                hazard_breakdown
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now_iso(),
+                location_label,
+                coordinates[0],
+                coordinates[1],
+                summary["dominant_hazard"],
+                summary["severity"],
+                summary["average_confidence"],
+                summary["risk_score"],
+                summary["hazard_count"],
+                summary["frames_analyzed"],
+                notes or "",
+                json.dumps(summary["severity_breakdown"]),
+                json.dumps(summary["hazard_breakdown"]),
+            ),
+        )
+        record_id = cursor.lastrowid
 
-    return risk_score, status
+    row = connection.execute(
+        "SELECT * FROM hazard_records WHERE id = ?",
+        (record_id,),
+    ).fetchone()
+    connection.close()
+
+    return serialize_hazard_row(row)
+
+
+def serialize_hazard_row(row):
+    data = dict(row)
+    data["severity_breakdown"] = json.loads(data["severity_breakdown"] or "{}")
+    data["hazard_breakdown"] = json.loads(data["hazard_breakdown"] or "{}")
+    data["confidence"] = round(float(data["confidence"]), 2)
+    data["latitude"] = round(float(data["latitude"]), 6)
+    data["longitude"] = round(float(data["longitude"]), 6)
+    return data
+
+
+def get_recent_hazards(limit=100):
+    connection = get_db_connection()
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM hazard_records
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    connection.close()
+    return [serialize_hazard_row(row) for row in rows]
 
 
 def parse_location(text):
@@ -104,24 +232,42 @@ def parse_location(text):
 
 
 def geocode_location(place):
-    if not ORS_API_KEY:
+    if not place:
         return None
 
+    if ORS_API_KEY:
+        try:
+            response = requests.get(
+                "https://api.openrouteservice.org/geocode/search",
+                params={"api_key": ORS_API_KEY, "text": place, "size": 1},
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+            features = data.get("features", [])
+
+            if features:
+                coords = features[0]["geometry"]["coordinates"]
+                return coords[1], coords[0]
+        except requests.RequestException:
+            pass
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
+
     try:
-        res = requests.get(
-            "https://api.openrouteservice.org/geocode/search",
-            params={"api_key": ORS_API_KEY, "text": place, "size": 1},
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": place, "format": "jsonv2", "limit": 1},
+            headers={"User-Agent": "find-my-avenue/1.0"},
             timeout=15,
         )
-        res.raise_for_status()
-        data = res.json()
-        features = data.get("features", [])
+        response.raise_for_status()
+        data = response.json()
 
-        if not features:
+        if not data:
             return None
 
-        coords = features[0]["geometry"]["coordinates"]
-        return coords[1], coords[0]
+        return float(data[0]["lat"]), float(data[0]["lon"])
     except requests.RequestException:
         return None
     except (KeyError, IndexError, TypeError, ValueError):
@@ -151,7 +297,7 @@ def extract_service_error(response, fallback):
 def build_route_results(data):
     routes = []
 
-    for index, route_data in enumerate(data.get("routes", [])):
+    for route_data in data.get("routes", []):
         decoded = polyline.decode(route_data["geometry"])
         summary = route_data.get("summary", {})
 
@@ -160,7 +306,6 @@ def build_route_results(data):
                 "coords": decoded,
                 "distance": round(summary.get("distance", 0) / 1000, 2),
                 "duration": round(summary.get("duration", 0) / 60, 2),
-                "color": ROUTE_COLORS[index % len(ROUTE_COLORS)],
             }
         )
 
@@ -172,12 +317,7 @@ def get_routes(start, end):
         raise RuntimeError("OpenRouteService API key is missing.")
 
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
-    base_body = {
-        "coordinates": [
-            [start[1], start[0]],
-            [end[1], end[0]],
-        ]
-    }
+    base_body = {"coordinates": [[start[1], start[0]], [end[1], end[0]]]}
     attempts = [
         {
             **base_body,
@@ -190,9 +330,9 @@ def get_routes(start, end):
 
     for body in attempts:
         try:
-            res = requests.post(url, json=body, headers=headers, timeout=30)
-            res.raise_for_status()
-            routes = build_route_results(res.json())
+            response = requests.post(url, json=body, headers=headers, timeout=30)
+            response.raise_for_status()
+            routes = build_route_results(response.json())
 
             if routes:
                 return routes
@@ -210,14 +350,217 @@ def get_routes(start, end):
     raise RuntimeError(last_error)
 
 
-def analyze_saved_video(job_id, path):
+def severity_from_score(score):
+    if score >= 105:
+        return "high"
+    if score >= 78:
+        return "medium"
+    return "low"
+
+
+def detect_road_anomalies(frame):
+    height, width = frame.shape[:2]
+    roi_top = int(height * 0.45)
+    roi = frame[roi_top:, :]
+
+    if roi.size == 0:
+        return []
+
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    gradient = cv2.morphologyEx(
+        enhanced,
+        cv2.MORPH_GRADIENT,
+        np.ones((3, 3), np.uint8),
+    )
+
+    threshold_value = int(max(35, min(110, cv2.mean(enhanced)[0] * 0.8)))
+    _, dark_mask = cv2.threshold(
+        enhanced,
+        threshold_value,
+        255,
+        cv2.THRESH_BINARY_INV,
+    )
+    _, edge_mask = cv2.threshold(gradient, 18, 255, cv2.THRESH_BINARY)
+    combined = cv2.bitwise_and(
+        dark_mask,
+        cv2.dilate(edge_mask, np.ones((3, 3), np.uint8), iterations=1),
+    )
+    combined = cv2.morphologyEx(
+        combined,
+        cv2.MORPH_CLOSE,
+        np.ones((7, 7), np.uint8),
+        iterations=2,
+    )
+    combined = cv2.morphologyEx(
+        combined,
+        cv2.MORPH_OPEN,
+        np.ones((3, 3), np.uint8),
+        iterations=1,
+    )
+
+    contours, _ = cv2.findContours(
+        combined,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+
+    roi_area = roi.shape[0] * roi.shape[1]
+    detections = []
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+
+        if area < 180 or area > roi_area * 0.12:
+            continue
+
+        x, y, box_width, box_height = cv2.boundingRect(contour)
+        aspect_ratio = box_width / max(box_height, 1)
+
+        if aspect_ratio < 0.35 or aspect_ratio > 4.5:
+            continue
+
+        fill_ratio = area / max(box_width * box_height, 1)
+
+        if fill_ratio < 0.18 or fill_ratio > 0.95:
+            continue
+
+        perimeter = cv2.arcLength(contour, True)
+
+        if perimeter <= 0:
+            continue
+
+        circularity = 4 * math.pi * area / (perimeter * perimeter)
+        center_bias = (y + (box_height / 2)) / max(roi.shape[0], 1)
+        contour_mask = np.zeros_like(enhanced)
+        cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+
+        darkness = 255 - cv2.mean(enhanced, mask=contour_mask)[0]
+        edge_strength = cv2.mean(gradient, mask=contour_mask)[0]
+        area_ratio = area / roi_area
+        score = darkness * 0.55 + edge_strength * 0.3 + center_bias * 20
+        score += min(25, area / 150)
+
+        if score < 55:
+            continue
+
+        confidence = min(0.94, 0.30 + (score / 140) + (area_ratio * 6))
+        severity = severity_from_score(score + (area_ratio * 1500))
+        hazard_type = "pothole" if circularity > 0.18 else "road anomaly"
+
+        detections.append(
+            {
+                "type": hazard_type,
+                "severity": severity,
+                "confidence": round(float(confidence), 2),
+            }
+        )
+
+    detections.sort(
+        key=lambda item: (
+            SEVERITY_ORDER[item["severity"]],
+            item["confidence"],
+        ),
+        reverse=True,
+    )
+
+    return detections[:5]
+
+
+def detect_with_custom_model(frame, detector):
+    height, width = frame.shape[:2]
+    results = detector.predict(frame, imgsz=640, conf=0.25, verbose=False, device="cpu")
+    detections = []
+
+    for result in results:
+        if result.boxes is None:
+            continue
+
+        for box in result.boxes:
+            cls = int(box.cls[0])
+            confidence = float(box.conf[0])
+
+            if isinstance(detector.names, dict):
+                label = detector.names.get(cls, str(cls))
+            else:
+                label = detector.names[cls]
+
+            x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
+            area_ratio = max(0.0, ((x2 - x1) * (y2 - y1)) / max(height * width, 1))
+            severity_metric = confidence * 90 + area_ratio * 1200
+
+            detections.append(
+                {
+                    "type": normalize_hazard_type(label),
+                    "severity": severity_from_score(severity_metric),
+                    "confidence": round(confidence, 2),
+                }
+            )
+
+    return detections
+
+
+def summarize_detections(all_detections, sampled_frames):
+    severity_breakdown = {"low": 0, "medium": 0, "high": 0}
+    hazard_breakdown = {}
+    weighted_score = 0.0
+    confidence_total = 0.0
+
+    for detection in all_detections:
+        severity_breakdown[detection["severity"]] += 1
+        hazard_breakdown[detection["type"]] = hazard_breakdown.get(detection["type"], 0) + 1
+        weighted_score += SEVERITY_WEIGHTS[detection["severity"]]
+        confidence_total += detection["confidence"]
+
+    hazard_count = len(all_detections)
+    average_confidence = round(confidence_total / hazard_count, 2) if hazard_count else 0.0
+    average_weight = weighted_score / max(sampled_frames, 1)
+    risk_score = min(100, int(round(average_weight * 18)))
+
+    if hazard_count == 0:
+        status = "No major road anomalies detected"
+        severity = "low"
+        dominant_hazard = "road anomaly"
+    elif risk_score < 30:
+        status = "Minor surface anomalies detected"
+        severity = "low"
+        dominant_hazard = max(hazard_breakdown, key=hazard_breakdown.get)
+    elif risk_score < 60:
+        status = "Caution: uneven road conditions"
+        severity = "medium"
+        dominant_hazard = max(hazard_breakdown, key=hazard_breakdown.get)
+    else:
+        status = "High hazard exposure on this road segment"
+        severity = "high"
+        dominant_hazard = max(hazard_breakdown, key=hazard_breakdown.get)
+
+    return {
+        "hazard_count": hazard_count,
+        "severity_breakdown": severity_breakdown,
+        "hazard_breakdown": hazard_breakdown,
+        "risk_score": risk_score,
+        "status": status,
+        "severity": severity,
+        "dominant_hazard": dominant_hazard,
+        "average_confidence": average_confidence,
+        "frames_analyzed": sampled_frames,
+    }
+
+
+def analyze_saved_video(job_id, path, location_label, notes):
     cap = None
 
     try:
+        coordinates = parse_location(location_label)
+
+        if coordinates is None:
+            raise ValueError("Could not understand that road location.")
+
         set_analysis_job(
             job_id,
             status="processing",
-            message="Opening the uploaded video...",
+            message="Opening the uploaded road clip...",
         )
 
         cap = cv2.VideoCapture(path)
@@ -229,16 +572,15 @@ def analyze_saved_video(job_id, path):
         fps = cap.get(cv2.CAP_PROP_FPS)
         fps = fps if fps and fps > 0 else 24
         frame_interval = max(int(round(fps)), 12)
-        max_frames = 12
+        max_frames = 18
         frame_index = 0
         sampled_frames = 0
-        hazards = 0
-        vehicle_classes = {"car", "truck", "bus", "motorcycle"}
+        all_detections = []
 
         set_analysis_job(
             job_id,
             status="processing",
-            message="Scanning the video for vehicles...",
+            message="Scanning the road surface for potholes and anomalies...",
         )
 
         while sampled_frames < max_frames:
@@ -251,39 +593,42 @@ def analyze_saved_video(job_id, path):
             sampled_frames += 1
             frame_index += frame_interval
             frame = resize_frame(frame)
-            results = detector.predict(
-                frame, imgsz=640, conf=0.25, verbose=False, device="cpu"
-            )
 
-            for result in results:
-                if result.boxes is None:
-                    continue
+            if detector is None:
+                detections = detect_road_anomalies(frame)
+            else:
+                detections = detect_with_custom_model(frame, detector)
 
-                for box in result.boxes:
-                    cls = int(box.cls[0])
+            all_detections.extend(detections)
 
-                    if isinstance(detector.names, dict):
-                        label = detector.names.get(cls, str(cls))
-                    else:
-                        label = detector.names[cls]
-
-                    if label in vehicle_classes:
-                        hazards += 1
+            if sampled_frames % 4 == 0:
+                set_analysis_job(
+                    job_id,
+                    status="processing",
+                    message=f"Analyzed {sampled_frames} frames so far...",
+                )
 
         if sampled_frames == 0:
             raise ValueError("No readable frames were found in the uploaded video.")
 
-        risk_score, status = build_risk_status(hazards, sampled_frames)
+        summary = summarize_detections(all_detections, sampled_frames)
+        record = None
+
+        if summary["hazard_count"] > 0:
+            record = insert_hazard_record(location_label, coordinates, summary, notes)
 
         set_analysis_job(
             job_id,
             status="completed",
             message="Analysis complete.",
             result={
-                "hazards": hazards,
-                "risk_score": risk_score,
-                "status": status,
-                "frames_analyzed": sampled_frames,
+                **summary,
+                "location": {
+                    "label": location_label,
+                    "latitude": round(coordinates[0], 6),
+                    "longitude": round(coordinates[1], 6),
+                },
+                "record": record,
             },
         )
     except ValueError as exc:
@@ -307,26 +652,151 @@ def analyze_saved_video(job_id, path):
                 app.logger.warning("Could not remove uploaded file: %s", path)
 
 
+def project_point_to_xy(point, reference_lat):
+    lat, lon = point
+    x = math.radians(lon) * 6371.0088 * math.cos(math.radians(reference_lat))
+    y = math.radians(lat) * 6371.0088
+    return x, y
+
+
+def point_to_segment_distance_km(point, start, end):
+    reference_lat = (point[0] + start[0] + end[0]) / 3
+    point_x, point_y = project_point_to_xy(point, reference_lat)
+    start_x, start_y = project_point_to_xy(start, reference_lat)
+    end_x, end_y = project_point_to_xy(end, reference_lat)
+
+    dx = end_x - start_x
+    dy = end_y - start_y
+
+    if dx == 0 and dy == 0:
+        return math.hypot(point_x - start_x, point_y - start_y)
+
+    t = ((point_x - start_x) * dx + (point_y - start_y) * dy) / ((dx * dx) + (dy * dy))
+    t = max(0.0, min(1.0, t))
+    nearest_x = start_x + (t * dx)
+    nearest_y = start_y + (t * dy)
+
+    return math.hypot(point_x - nearest_x, point_y - nearest_y)
+
+
+def simplify_route_coords(coords, max_points=90):
+    if len(coords) <= max_points:
+        return coords
+
+    step = max(1, len(coords) // max_points)
+    simplified = coords[::step]
+
+    if simplified[-1] != coords[-1]:
+        simplified.append(coords[-1])
+
+    return simplified
+
+
+def score_route_against_hazards(route_coords, hazards):
+    simplified = simplify_route_coords(route_coords)
+
+    if len(simplified) < 2:
+        return {
+            "safety_score": 100.0,
+            "hazard_count": 0,
+            "safety_label": "Safer route",
+            "nearby_hazards": [],
+            "penalty": 0.0,
+        }
+
+    impacts = []
+    penalty = 0.0
+
+    for hazard in hazards:
+        hazard_point = (hazard["latitude"], hazard["longitude"])
+        distance = min(
+            point_to_segment_distance_km(hazard_point, start, end)
+            for start, end in zip(simplified[:-1], simplified[1:])
+        )
+
+        if distance > HAZARD_INFLUENCE_KM:
+            continue
+
+        proximity = 1 - (distance / HAZARD_INFLUENCE_KM)
+        severity_factor = {"low": 0.55, "medium": 1.0, "high": 1.45}[hazard["severity"]]
+        risk_factor = max(0.45, hazard["risk_score"] / 100)
+        impact = 9.0 * severity_factor * (0.45 + proximity) * risk_factor
+        penalty += impact
+
+        impacts.append(
+            {
+                "id": hazard["id"],
+                "location_label": hazard["location_label"],
+                "severity": hazard["severity"],
+                "distance_km": round(distance, 2),
+                "risk_score": hazard["risk_score"],
+                "hazard_type": hazard["hazard_type"],
+            }
+        )
+
+    impacts.sort(key=lambda item: item["distance_km"])
+    safety_score = max(5, round(100 - min(85, penalty * 4), 1))
+
+    if safety_score >= 75:
+        safety_label = "Safer route"
+    elif safety_score >= 50:
+        safety_label = "Use caution"
+    else:
+        safety_label = "Avoid if possible"
+
+    return {
+        "safety_score": safety_score,
+        "hazard_count": len(impacts),
+        "safety_label": safety_label,
+        "nearby_hazards": impacts[:5],
+        "penalty": round(penalty, 2),
+    }
+
+
+def enrich_routes_with_hazards(routes):
+    hazards = get_recent_hazards(limit=200)
+
+    for route in routes:
+        safety = score_route_against_hazards(route["coords"], hazards)
+        route.update(safety)
+        route["recommended_score"] = round(
+            route["duration"] + ((100 - route["safety_score"]) / 6),
+            2,
+        )
+
+    ranking = sorted(
+        range(len(routes)),
+        key=lambda index: routes[index]["recommended_score"],
+    )
+
+    for rank, route_index in enumerate(ranking):
+        routes[route_index]["route_rank"] = rank + 1
+        routes[route_index]["recommended"] = rank == 0
+        routes[route_index]["color"] = ROUTE_COLORS[min(rank, len(ROUTE_COLORS) - 1)]
+
+    return routes
+
+
 @app.route("/api/traffic/tile/<int:z>/<int:x>/<int:y>.png")
 def traffic_tile(z, x, y):
     if not TOMTOM_API_KEY:
         return ("Traffic service is not configured.", 503)
 
     try:
-        res = requests.get(
+        response = requests.get(
             f"https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png",
             params={"key": TOMTOM_API_KEY, "tileSize": 256},
             timeout=20,
         )
-        res.raise_for_status()
+        response.raise_for_status()
     except requests.RequestException:
         app.logger.exception("Traffic tile request failed for %s/%s/%s", z, x, y)
         return ("Traffic tile unavailable.", 502)
 
     return Response(
-        res.content,
-        mimetype=res.headers.get("Content-Type", "image/png"),
-        headers={"Cache-Control": res.headers.get("Cache-Control", "no-store")},
+        response.content,
+        mimetype=response.headers.get("Content-Type", "image/png"),
+        headers={"Cache-Control": response.headers.get("Cache-Control", "no-store")},
     )
 
 
@@ -350,7 +820,16 @@ def request_entity_too_large(_error):
     return jsonify({"error": "Video is too large. Upload a clip under 50 MB."}), 413
 
 
-@app.route("/api/route",methods=["POST"])
+@app.route("/api/hazards", methods=["GET"])
+def hazards_api():
+    limit = request.args.get("limit", default=100, type=int)
+    if limit is None:
+        limit = 100
+    limit = max(1, min(limit, 250))
+    return jsonify({"hazards": get_recent_hazards(limit=limit)})
+
+
+@app.route("/api/route", methods=["POST"])
 def route_api():
     data = request.get_json(silent=True) or {}
     start = parse_location(data.get("start"))
@@ -370,24 +849,32 @@ def route_api():
     if not routes:
         return jsonify({"error": "No routes were found for that trip."}), 404
 
-    return jsonify({"routes": routes})
+    return jsonify({"routes": enrich_routes_with_hazards(routes)})
 
 
-@app.route("/analyze_video",methods=["POST"])
+@app.route("/analyze_video", methods=["POST"])
 def analyze_video():
     file = request.files.get("video")
+    location_label = (request.form.get("location") or "").strip()
+    notes = (request.form.get("notes") or "").strip()
 
     if file is None or not file.filename:
-        return jsonify({"error": "Choose a video file before analyzing."}), 400
+        return jsonify({"error": "Choose a road video before analyzing."}), 400
 
     if not allowed_video_file(file.filename):
         return jsonify(
             {"error": "Upload an mp4, mov, avi, mkv, webm, or m4v video file."}
         ), 400
 
+    if not location_label:
+        return jsonify(
+            {"error": "Add the road location so the result can be saved to the hazard map."}
+        ), 400
+
     filename = secure_filename(file.filename)
     extension = os.path.splitext(filename)[1].lower() or ".mp4"
     path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}{extension}")
+
     try:
         file.save(path)
         job_id = uuid.uuid4().hex
@@ -398,7 +885,7 @@ def analyze_video():
         )
         thread = threading.Thread(
             target=analyze_saved_video,
-            args=(job_id, path),
+            args=(job_id, path, location_label, notes),
             daemon=True,
         )
         thread.start()
@@ -411,9 +898,7 @@ def analyze_video():
         ), 202
     except OSError:
         app.logger.exception("Could not save uploaded video.")
-        return jsonify(
-            {"error": "The server could not save that video file."}
-        ), 500
+        return jsonify({"error": "The server could not save that video file."}), 500
 
 
 @app.route("/analyze_video/<job_id>", methods=["GET"])
@@ -426,8 +911,9 @@ def analyze_video_status(job_id):
     return jsonify(job)
 
 
-if __name__=="__main__":
+init_db()
 
-    port=int(os.environ.get("PORT",5000))
 
-    app.run(host="0.0.0.0",port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
