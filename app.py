@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import os
@@ -7,13 +8,13 @@ import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
+from time import monotonic
 
-import cv2
-import numpy as np
 import polyline
 import requests
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request
+from requests.adapters import HTTPAdapter
 from werkzeug.utils import secure_filename
 
 load_dotenv()
@@ -143,6 +144,102 @@ TWILIO_VOICE_FROM_NUMBER = os.getenv("TWILIO_VOICE_FROM_NUMBER") or TWILIO_SMS_F
 model = None
 analysis_jobs = {}
 analysis_lock = threading.Lock()
+http_session = None
+cv2_module = None
+np_module = None
+cache_lock = threading.Lock()
+location_cache = {}
+route_cache = {}
+hazard_cache = {}
+
+LOCATION_CACHE_TTL_SECONDS = 15 * 60
+ROUTE_CACHE_TTL_SECONDS = 5 * 60
+HAZARD_CACHE_TTL_SECONDS = 20
+ANALYSIS_JOB_TTL_SECONDS = 60 * 60
+TRAFFIC_TILE_CACHE_SECONDS = 45
+
+
+def get_http_session():
+    global http_session
+
+    if http_session is None:
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        http_session = session
+
+    return http_session
+
+
+def get_cv2():
+    global cv2_module
+
+    if cv2_module is None:
+        import cv2
+
+        cv2_module = cv2
+
+    return cv2_module
+
+
+def get_np():
+    global np_module
+
+    if np_module is None:
+        import numpy as np
+
+        np_module = np
+
+    return np_module
+
+
+def cleanup_analysis_jobs(now=None):
+    now = monotonic() if now is None else now
+    expired_ids = [
+        job_id
+        for job_id, payload in analysis_jobs.items()
+        if now - payload.get("_updated_at", now) > ANALYSIS_JOB_TTL_SECONDS
+    ]
+
+    for job_id in expired_ids:
+        analysis_jobs.pop(job_id, None)
+
+
+def cache_get(cache_store, key):
+    now = monotonic()
+
+    with cache_lock:
+        payload = cache_store.get(key)
+
+        if not payload:
+            return None
+
+        if payload["expires_at"] <= now:
+            cache_store.pop(key, None)
+            return None
+
+        return copy.deepcopy(payload["value"])
+
+
+def cache_set(cache_store, key, value, ttl_seconds):
+    with cache_lock:
+        cache_store[key] = {
+            "value": copy.deepcopy(value),
+            "expires_at": monotonic() + ttl_seconds,
+        }
+
+
+def cache_clear(cache_store):
+    with cache_lock:
+        cache_store.clear()
+
+
+def normalize_focus_key(focus):
+    if focus is None:
+        return None
+
+    return (round(float(focus[0]), 4), round(float(focus[1]), 4))
 
 
 def get_db_connection():
@@ -257,6 +354,7 @@ def allowed_video_file(filename):
 
 
 def resize_frame(frame, max_width=720):
+    cv2 = get_cv2()
     height, width = frame.shape[:2]
 
     if width <= max_width:
@@ -284,13 +382,21 @@ def get_model():
 
 def set_analysis_job(job_id, **values):
     with analysis_lock:
+        cleanup_analysis_jobs()
         analysis_jobs.setdefault(job_id, {}).update(values)
+        analysis_jobs[job_id]["_updated_at"] = monotonic()
 
 
 def get_analysis_job(job_id):
     with analysis_lock:
+        cleanup_analysis_jobs()
         job = analysis_jobs.get(job_id)
-        return dict(job) if job is not None else None
+        if job is None:
+            return None
+
+        data = dict(job)
+        data.pop("_updated_at", None)
+        return data
 
 
 def insert_hazard_record(
@@ -348,6 +454,7 @@ def insert_hazard_record(
         (record_id,),
     ).fetchone()
     connection.close()
+    cache_clear(hazard_cache)
 
     return serialize_hazard_row(row)
 
@@ -364,6 +471,12 @@ def serialize_hazard_row(row):
 
 
 def get_recent_hazards(limit=100):
+    cache_key = int(limit or 100)
+    cached = cache_get(hazard_cache, cache_key)
+
+    if cached is not None:
+        return cached
+
     connection = get_db_connection()
     rows = connection.execute(
         """
@@ -375,7 +488,9 @@ def get_recent_hazards(limit=100):
         (limit,),
     ).fetchall()
     connection.close()
-    return [serialize_hazard_row(row) for row in rows]
+    hazards = [serialize_hazard_row(row) for row in rows]
+    cache_set(hazard_cache, cache_key, hazards, HAZARD_CACHE_TTL_SECONDS)
+    return hazards
 
 
 def get_hazard_by_id(hazard_id):
@@ -845,6 +960,7 @@ def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT, focus=None):
     if not ORS_API_KEY:
         return []
 
+    session = get_http_session()
     candidates = []
 
     for query in build_place_query_variants(place):
@@ -855,7 +971,7 @@ def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT, focus=None):
                 params["focus.point.lat"] = focus[0]
                 params["focus.point.lon"] = focus[1]
 
-            response = requests.get(
+            response = session.get(
                 "https://api.openrouteservice.org/geocode/search",
                 params=params,
                 timeout=15,
@@ -903,11 +1019,12 @@ def search_ors_candidates(place, limit=PLACE_RESULT_LIMIT, focus=None):
 
 
 def search_nominatim_candidates(place, limit=PLACE_RESULT_LIMIT, focus=None):
+    session = get_http_session()
     candidates = []
 
     for query in build_place_query_variants(place):
         try:
-            response = requests.get(
+            response = session.get(
                 "https://nominatim.openstreetmap.org/search",
                 params={
                     "q": query,
@@ -991,11 +1108,19 @@ def search_location_candidates(place, limit=PLACE_RESULT_LIMIT, focus=None):
     if not normalized:
         return []
 
+    cache_key = (normalized, int(limit), normalize_focus_key(focus))
+    cached = cache_get(location_cache, cache_key)
+
+    if cached is not None:
+        return cached
+
     candidates = search_ors_candidates(normalized, limit=limit, focus=focus)
     candidates.extend(
         search_nominatim_candidates(normalized, limit=limit, focus=focus)
     )
-    return dedupe_location_candidates(candidates, limit=limit)
+    deduped = dedupe_location_candidates(candidates, limit=limit)
+    cache_set(location_cache, cache_key, deduped, LOCATION_CACHE_TTL_SECONDS)
+    return deduped
 
 
 def parse_location(text, focus=None):
@@ -1079,7 +1204,20 @@ def get_routes(start, end, mode="drive"):
     if not ORS_API_KEY:
         raise RuntimeError("OpenRouteService API key is missing.")
 
+    cache_key = (
+        round(float(start[0]), 5),
+        round(float(start[1]), 5),
+        round(float(end[0]), 5),
+        round(float(end[1]), 5),
+        mode,
+    )
+    cached = cache_get(route_cache, cache_key)
+
+    if cached is not None:
+        return cached
+
     route_mode = ROUTE_MODES[mode]
+    session = get_http_session()
     url = (
         "https://api.openrouteservice.org/v2/directions/"
         f"{route_mode['profile']}"
@@ -1097,11 +1235,12 @@ def get_routes(start, end, mode="drive"):
 
     for body in attempts:
         try:
-            response = requests.post(url, json=body, headers=headers, timeout=30)
+            response = session.post(url, json=body, headers=headers, timeout=30)
             response.raise_for_status()
             routes = build_route_results(response.json())
 
             if routes:
+                cache_set(route_cache, cache_key, routes, ROUTE_CACHE_TTL_SECONDS)
                 return routes
 
             last_error = "No routes were returned for that trip."
@@ -1126,6 +1265,8 @@ def severity_from_score(score):
 
 
 def detect_road_anomalies(frame):
+    cv2 = get_cv2()
+    np = get_np()
     height, width = frame.shape[:2]
     roi_top = int(height * 0.45)
     roi = frame[roi_top:, :]
@@ -1316,6 +1457,7 @@ def summarize_detections(all_detections, sampled_frames):
 
 
 def analyze_saved_video(job_id, path, location_label, source_location, notes):
+    cv2 = get_cv2()
     cap = None
 
     try:
@@ -1571,8 +1713,10 @@ def traffic_tile(z, x, y):
     if not TOMTOM_API_KEY:
         return ("Traffic service is not configured.", 503)
 
+    session = get_http_session()
+
     try:
-        response = requests.get(
+        response = session.get(
             f"https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png",
             params={"key": TOMTOM_API_KEY, "tileSize": 256},
             timeout=20,
@@ -1585,7 +1729,7 @@ def traffic_tile(z, x, y):
     return Response(
         response.content,
         mimetype=response.headers.get("Content-Type", "image/png"),
-        headers={"Cache-Control": response.headers.get("Cache-Control", "no-store")},
+        headers={"Cache-Control": f"public, max-age={TRAFFIC_TILE_CACHE_SECONDS}"},
     )
 
 
