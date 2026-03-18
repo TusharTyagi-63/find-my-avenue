@@ -24,9 +24,14 @@
 <datalist id="endSuggestions"></datalist>
 
 <div class="mode-switch" id="modeSwitch">
-<button type="button" class="mode-button active" data-mode="drive" onclick="setRouteMode('drive', true)">Drive</button>
-<button type="button" class="mode-button" data-mode="ride" onclick="setRouteMode('ride', true)">Ride</button>
-<button type="button" class="mode-button" data-mode="walk" onclick="setRouteMode('walk', true)">Walk</button>
+<button type="button" class="mode-button active" data-mode="drive" onclick="setPrimaryMode('drive', true)">Drive</button>
+<button type="button" class="mode-button" data-mode="ride" onclick="setPrimaryMode('ride', true)">Ride</button>
+<button type="button" class="mode-button" data-mode="walk" onclick="setPrimaryMode('walk', true)">Walk</button>
+</div>
+<div id="rideOptions" class="ride-options hidden">
+<span class="ride-options-label">Ride type:</span>
+<button type="button" class="ride-option active" data-ride-mode="bike" onclick="setRideVariant('bike', true)">Bike</button>
+<button type="button" class="ride-option" data-ride-mode="bicycle" onclick="setRideVariant('bicycle', true)">Bicycle</button>
 </div>
 
 <button onclick="getLocation()">My Location</button>
@@ -65,6 +70,8 @@ attribution: 'Traffic \u00a9 TomTom'
 var trafficVisible = false;
 var startMarker = null;
 var selectedMode = "drive";
+var selectedPrimaryMode = "drive";
+var selectedRideMode = "bike";
 var locationSuggestionCache = {};
 var selectedLocations = {
 start: null,
@@ -72,7 +79,8 @@ end: null
 };
 var routeModeLabels = {
 drive: "Drive",
-ride: "Ride",
+bike: "Bike",
+bicycle: "Bicycle",
 walk: "Walk"
 };
 
@@ -351,28 +359,57 @@ document.getElementById("summaryBar").innerHTML = "Could not fetch your current 
 }
 
 
-function setRouteMode(mode, reroute) {
-
-selectedMode = mode;
-
+function syncModeControls() {
 document.querySelectorAll(".mode-button").forEach(function(button) {
-button.classList.toggle("active", button.dataset.mode === mode);
+button.classList.toggle("active", button.dataset.mode === selectedPrimaryMode);
 });
 
+document.querySelectorAll(".ride-option").forEach(function(button) {
+button.classList.toggle("active", button.dataset.rideMode === selectedRideMode);
+});
+
+document.getElementById("rideOptions").classList.toggle("hidden", selectedPrimaryMode !== "ride");
+}
+
+
+function updateModeSummary(reroute) {
 let summaryBar = document.getElementById("summaryBar");
 let start = document.getElementById("start").value.trim();
 let end = document.getElementById("end").value.trim();
-let modeLabel = routeModeLabels[mode] || "Drive";
+let modeLabel = routeModeLabels[selectedMode] || "Drive";
 
 if (!start || !end) {
+if (selectedPrimaryMode === "ride") {
+summaryBar.innerHTML = "Ride mode selected. Current ride type: " + modeLabel + ". Enter your start and end points to load matching routes.";
+} else {
 summaryBar.innerHTML = modeLabel + " mode selected. Enter your start and end points to load matching routes.";
+}
 return;
 }
 
 if (reroute) {
 getRoute();
 }
+}
 
+
+function setPrimaryMode(mode, reroute) {
+selectedPrimaryMode = mode;
+selectedMode = mode === "ride" ? selectedRideMode : mode;
+syncModeControls();
+updateModeSummary(reroute);
+}
+
+
+function setRideVariant(mode, reroute) {
+selectedRideMode = mode;
+
+if (selectedPrimaryMode === "ride") {
+selectedMode = mode;
+}
+
+syncModeControls();
+updateModeSummary(reroute);
 }
 
 
@@ -493,6 +530,7 @@ summaryBar.innerHTML = "Could not load routes right now.";
 loadHazards();
 attachLocationAutocomplete("start", "startSuggestions");
 attachLocationAutocomplete("end", "endSuggestions");
+syncModeControls();
 
 </script>
 

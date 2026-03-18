@@ -31,7 +31,8 @@ HAZARD_INFLUENCE_KM = 0.4
 ROUTE_COLORS = ["#38bdf8", "#6366f1", "#94a3b8"]
 ROUTE_MODES = {
     "drive": {"profile": "driving-car", "label": "Drive"},
-    "ride": {"profile": "cycling-regular", "label": "Ride"},
+    "bike": {"profile": "driving-car", "label": "Bike"},
+    "bicycle": {"profile": "cycling-regular", "label": "Bicycle"},
     "walk": {"profile": "foot-walking", "label": "Walk"},
 }
 DEFAULT_COUNTRY_HINT = os.getenv("GEOCODE_COUNTRY_HINT", "India")
@@ -1063,6 +1064,14 @@ def normalize_route_mode(mode):
         return "drive"
 
     normalized = str(mode).strip().lower()
+    legacy_aliases = {
+        "ride": "bicycle",
+        "cycle": "bicycle",
+        "motorbike": "bike",
+        "motorcycle": "bike",
+        "scooter": "bike",
+    }
+    normalized = legacy_aliases.get(normalized, normalized)
     return normalized if normalized in ROUTE_MODES else None
 
 

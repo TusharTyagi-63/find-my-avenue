@@ -37,6 +37,23 @@ flex-wrap:wrap;
 gap:8px;
 }
 
+.ride-options{
+display:flex;
+flex-wrap:wrap;
+align-items:center;
+gap:8px;
+padding:8px 12px;
+border-radius:12px;
+background:#0f172a;
+border:1px solid #243041;
+}
+
+.ride-options-label{
+color:#cbd5e1;
+font-size:0.9rem;
+font-weight:bold;
+}
+
 .mode-button{
 background:#0f172a;
 color:#cbd5e1;
@@ -50,6 +67,22 @@ background:#172554;
 .mode-button.active{
 background:#2563eb;
 border-color:#2563eb;
+color:white;
+}
+
+.ride-option{
+background:#111827;
+color:#cbd5e1;
+border:1px solid #334155;
+}
+
+.ride-option:hover{
+background:#172554;
+}
+
+.ride-option.active{
+background:#0ea5e9;
+border-color:#0ea5e9;
 color:white;
 }
 
