@@ -23,15 +23,20 @@
 <input id="end" list="endSuggestions" placeholder="Destination: city, college, hospital, landmark">
 <datalist id="endSuggestions"></datalist>
 
-<div class="mode-switch" id="modeSwitch">
-<button type="button" class="mode-button active" data-mode="drive" onclick="setPrimaryMode('drive', true)">Drive</button>
-<button type="button" class="mode-button" data-mode="ride" onclick="setPrimaryMode('ride', true)">Ride</button>
-<button type="button" class="mode-button" data-mode="walk" onclick="setPrimaryMode('walk', true)">Walk</button>
+<div class="mode-picker" id="modePicker">
+<button id="modeMenuButton" type="button" class="mode-menu-button" onclick="toggleModeMenu(event)">Mode: Drive</button>
+<div id="modeMenu" class="mode-menu hidden">
+<button type="button" class="mode-menu-item active" data-mode-option="drive" onclick="selectPrimaryMode('drive')">Drive</button>
+<button type="button" class="mode-menu-item has-children" data-mode-option="ride" onclick="toggleRideMenu(event)">
+<span>Ride</span>
+<span id="rideMenuCaret" class="menu-caret">›</span>
+</button>
+<div id="rideSubmenu" class="mode-submenu hidden">
+<button type="button" class="mode-submenu-item active" data-ride-mode="bike" onclick="selectRideVariant('bike')">Bike</button>
+<button type="button" class="mode-submenu-item" data-ride-mode="bicycle" onclick="selectRideVariant('bicycle')">Bicycle</button>
 </div>
-<div id="rideOptions" class="ride-options hidden">
-<span class="ride-options-label">Ride type:</span>
-<button type="button" class="ride-option active" data-ride-mode="bike" onclick="setRideVariant('bike', true)">Bike</button>
-<button type="button" class="ride-option" data-ride-mode="bicycle" onclick="setRideVariant('bicycle', true)">Bicycle</button>
+<button type="button" class="mode-menu-item" data-mode-option="walk" onclick="selectPrimaryMode('walk')">Walk</button>
+</div>
 </div>
 
 <button onclick="getLocation()">My Location</button>
@@ -359,57 +364,75 @@ document.getElementById("summaryBar").innerHTML = "Could not fetch your current 
 }
 
 
+function getSelectedModeLabel() {
+return routeModeLabels[selectedMode] || "Drive";
+}
+
+
+function closeModeMenus() {
+document.getElementById("modeMenu").classList.add("hidden");
+document.getElementById("rideSubmenu").classList.add("hidden");
+document.getElementById("rideMenuCaret").textContent = "›";
+}
+
+
 function syncModeControls() {
-document.querySelectorAll(".mode-button").forEach(function(button) {
-button.classList.toggle("active", button.dataset.mode === selectedPrimaryMode);
+document.getElementById("modeMenuButton").textContent = "Mode: " + getSelectedModeLabel();
+
+document.querySelectorAll(".mode-menu-item[data-mode-option]").forEach(function(button) {
+let mode = button.dataset.modeOption;
+let isActive = mode === "ride" ? selectedPrimaryMode === "ride" : selectedPrimaryMode === mode;
+button.classList.toggle("active", isActive);
 });
 
-document.querySelectorAll(".ride-option").forEach(function(button) {
+document.querySelectorAll(".mode-submenu-item").forEach(function(button) {
 button.classList.toggle("active", button.dataset.rideMode === selectedRideMode);
 });
-
-document.getElementById("rideOptions").classList.toggle("hidden", selectedPrimaryMode !== "ride");
 }
 
 
-function updateModeSummary(reroute) {
-let summaryBar = document.getElementById("summaryBar");
-let start = document.getElementById("start").value.trim();
-let end = document.getElementById("end").value.trim();
-let modeLabel = routeModeLabels[selectedMode] || "Drive";
+function toggleModeMenu(event) {
+event.stopPropagation();
+let modeMenu = document.getElementById("modeMenu");
+let shouldOpen = modeMenu.classList.contains("hidden");
+closeModeMenus();
 
-if (!start || !end) {
-if (selectedPrimaryMode === "ride") {
-summaryBar.innerHTML = "Ride mode selected. Current ride type: " + modeLabel + ". Enter your start and end points to load matching routes.";
-} else {
-summaryBar.innerHTML = modeLabel + " mode selected. Enter your start and end points to load matching routes.";
-}
-return;
-}
-
-if (reroute) {
-getRoute();
+if (shouldOpen) {
+modeMenu.classList.remove("hidden");
 }
 }
 
 
-function setPrimaryMode(mode, reroute) {
+function toggleRideMenu(event) {
+event.stopPropagation();
+let modeMenu = document.getElementById("modeMenu");
+let rideSubmenu = document.getElementById("rideSubmenu");
+let rideMenuCaret = document.getElementById("rideMenuCaret");
+
+if (modeMenu.classList.contains("hidden")) {
+modeMenu.classList.remove("hidden");
+}
+
+let shouldOpen = rideSubmenu.classList.contains("hidden");
+rideSubmenu.classList.toggle("hidden", !shouldOpen);
+rideMenuCaret.textContent = shouldOpen ? "▾" : "›";
+}
+
+
+function selectPrimaryMode(mode) {
 selectedPrimaryMode = mode;
-selectedMode = mode === "ride" ? selectedRideMode : mode;
-syncModeControls();
-updateModeSummary(reroute);
-}
-
-
-function setRideVariant(mode, reroute) {
-selectedRideMode = mode;
-
-if (selectedPrimaryMode === "ride") {
 selectedMode = mode;
+syncModeControls();
+closeModeMenus();
 }
 
+
+function selectRideVariant(mode) {
+selectedPrimaryMode = "ride";
+selectedRideMode = mode;
+selectedMode = mode;
 syncModeControls();
-updateModeSummary(reroute);
+closeModeMenus();
 }
 
 
@@ -531,6 +554,12 @@ loadHazards();
 attachLocationAutocomplete("start", "startSuggestions");
 attachLocationAutocomplete("end", "endSuggestions");
 syncModeControls();
+
+document.addEventListener("click", function(event) {
+if (!document.getElementById("modePicker").contains(event.target)) {
+closeModeMenus();
+}
+});
 
 </script>
 
