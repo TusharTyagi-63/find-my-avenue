@@ -23,7 +23,7 @@
 
 <div class="panel panel-wide">
 <h2>Road Hazard Detection</h2>
-<p class="helper-text">Upload a short road clip under 50 MB, tag the road location, and add the source location if the clip was captured or reported from somewhere specific.</p>
+<p class="helper-text">Upload a short road clip under 50 MB to analyze potholes, surface cracks, and roadway obstacles. Tag the road location, and add the source location if the clip was captured or reported from somewhere specific.</p>
 
 <form id="uploadForm">
 
@@ -114,6 +114,24 @@ function formatBreakdown(breakdown) {
 return "Low " + (breakdown.low || 0) + " | Medium " + (breakdown.medium || 0) + " | High " + (breakdown.high || 0);
 }
 
+function formatTopHazards(topHazards) {
+if (!topHazards || !topHazards.length) {
+return "No dominant hazards";
+}
+
+return topHazards.map(function(item) {
+return item.type + " (" + item.count + ")";
+}).join(" | ");
+}
+
+function formatDetectionEngines(engines) {
+if (!engines || !engines.length) {
+return "Surface analysis";
+}
+
+return engines.join(" + ");
+}
+
 async function readPayload(res) {
 let text = await res.text();
 
@@ -143,6 +161,7 @@ return `
 </div>
 <div class="report-meta">${escapeHtml(hazard.hazard_type)} | Risk ${hazard.risk_score} | Detections ${hazard.hazard_count}</div>
 <div class="report-meta">Source: ${escapeHtml(hazard.source_location || hazard.location_label)}</div>
+<div class="report-meta">Top Hazards: ${escapeHtml(formatTopHazards(hazard.top_hazards || []))}</div>
 <div class="report-meta">${formatBreakdown(hazard.severity_breakdown)}</div>
 <div class="report-meta">${escapeHtml(hazard.created_at)}</div>
 ${hazard.notes ? `<div class="report-note">${escapeHtml(hazard.notes)}</div>` : ''}
@@ -207,17 +226,31 @@ if (data.status === "completed" && data.result) {
 let reportMessage = data.result.record
 ? "<br>Saved Hazard Report: #" + data.result.record.id + " at " + escapeHtml(data.result.record.location_label)
 : "<br>No strong road hazard was saved from this clip.";
+let modelNotes = "";
+
+if (data.result.surface_detection_status === "fallback-heuristic" && data.result.surface_detection_error) {
+modelNotes += "<br>Surface Model Note: " + escapeHtml(data.result.surface_detection_error);
+}
+
+if (data.result.object_detection_status === "unavailable" && data.result.object_detection_error) {
+modelNotes += "<br>Object Model Note: " + escapeHtml(data.result.object_detection_error);
+}
 
 showResult(
 "Road Location: " + escapeHtml(data.result.location.label) +
 "<br>Source Location: " + escapeHtml(data.result.location.source_label || data.result.location.label) +
 "<br>" +
-"Detected Road Hazards: " + data.result.hazard_count +
+"Detected Hazards: " + data.result.hazard_count +
+"<br>Surface Hazards: " + (data.result.surface_hazard_count || 0) +
+"<br>Roadway Objects: " + (data.result.object_hazard_count || 0) +
 "<br>Frames Analyzed: " + data.result.frames_analyzed +
 "<br>Risk Score: " + data.result.risk_score +
 "<br>Status: " + escapeHtml(data.result.status) +
+"<br>Detection Engines: " + escapeHtml(formatDetectionEngines(data.result.detection_engines || [])) +
 "<br>Dominant Hazard: " + escapeHtml(data.result.dominant_hazard) +
+"<br>Top Hazards: " + escapeHtml(formatTopHazards(data.result.top_hazards || [])) +
 "<br>Severity Mix: " + formatBreakdown(data.result.severity_breakdown) +
+modelNotes +
 reportMessage,
 "success"
 );

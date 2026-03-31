@@ -95,6 +95,70 @@ ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm", "m4v"}
 SEVERITY_WEIGHTS = {"low": 1.0, "medium": 2.4, "high": 4.0}
 SEVERITY_ORDER = {"low": 1, "medium": 2, "high": 3}
 CUSTOM_HAZARD_MODEL_PATH = os.getenv("ROAD_HAZARD_MODEL_PATH")
+DEFAULT_OBJECT_MODEL_NAME = os.getenv("ROAD_OBJECT_MODEL_NAME", "yolov8n.pt")
+OBJECT_DETECTION_ENABLED = os.getenv(
+    "ROAD_OBJECT_DETECTION_ENABLED",
+    "1",
+).strip().lower() not in {"0", "false", "no", "off"}
+OBJECT_HAZARD_RULES = {
+    "person": {
+        "type": "pedestrian obstruction",
+        "base_score": 76,
+        "min_area_ratio": 0.004,
+    },
+    "bicycle": {
+        "type": "cycle obstruction",
+        "base_score": 66,
+        "min_area_ratio": 0.006,
+    },
+    "motorcycle": {
+        "type": "two wheeler obstruction",
+        "base_score": 70,
+        "min_area_ratio": 0.008,
+    },
+    "car": {
+        "type": "vehicle obstruction",
+        "base_score": 62,
+        "min_area_ratio": 0.02,
+    },
+    "bus": {
+        "type": "heavy vehicle obstruction",
+        "base_score": 75,
+        "min_area_ratio": 0.016,
+    },
+    "truck": {
+        "type": "heavy vehicle obstruction",
+        "base_score": 78,
+        "min_area_ratio": 0.016,
+    },
+    "dog": {
+        "type": "stray animal",
+        "base_score": 74,
+        "min_area_ratio": 0.003,
+    },
+    "cat": {
+        "type": "stray animal",
+        "base_score": 64,
+        "min_area_ratio": 0.002,
+    },
+    "cow": {
+        "type": "stray animal",
+        "base_score": 82,
+        "min_area_ratio": 0.008,
+    },
+    "horse": {
+        "type": "stray animal",
+        "base_score": 80,
+        "min_area_ratio": 0.008,
+    },
+    "sheep": {
+        "type": "stray animal",
+        "base_score": 68,
+        "min_area_ratio": 0.003,
+    },
+}
+SURFACE_SOURCE_LABEL = "surface"
+OBJECT_SOURCE_LABEL = "object"
 INCIDENT_SERVICE_PROFILES = {
     "accident": [
         "Simulated Ambulance Dispatch",
@@ -142,8 +206,12 @@ TWILIO_SMS_FROM_NUMBER = os.getenv("TWILIO_SMS_FROM_NUMBER")
 TWILIO_VOICE_FROM_NUMBER = os.getenv("TWILIO_VOICE_FROM_NUMBER") or TWILIO_SMS_FROM_NUMBER
 
 model = None
+model_error = None
+object_model = None
+object_model_error = None
 analysis_jobs = {}
 analysis_lock = threading.Lock()
+model_lock = threading.Lock()
 http_session = None
 cv2_module = None
 np_module = None
@@ -342,6 +410,35 @@ def utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def hazard_recency_factor(created_at):
+    if not created_at:
+        return 0.65
+
+    try:
+        reported_at = datetime.fromisoformat(str(created_at))
+    except ValueError:
+        return 0.65
+
+    if reported_at.tzinfo is None:
+        reported_at = reported_at.replace(tzinfo=timezone.utc)
+
+    age_hours = max(
+        0.0,
+        (datetime.now(timezone.utc) - reported_at).total_seconds() / 3600,
+    )
+
+    if age_hours <= 12:
+        return 1.0
+    if age_hours <= 72:
+        return 0.88
+    if age_hours <= 24 * 14:
+        return 0.7
+    if age_hours <= 24 * 60:
+        return 0.48
+
+    return 0.3
+
+
 def normalize_hazard_type(label):
     return label.replace("_", " ").strip().lower()
 
@@ -367,17 +464,80 @@ def resize_frame(frame, max_width=720):
 
 
 def get_model():
-    global model
+    global model, model_error
 
     if not CUSTOM_HAZARD_MODEL_PATH:
         return None
 
     if model is None:
-        from ultralytics import YOLO
+        with model_lock:
+            if model is None:
+                if model_error:
+                    return None
 
-        model = YOLO(CUSTOM_HAZARD_MODEL_PATH)
+                try:
+                    from ultralytics import YOLO
+
+                    model = YOLO(CUSTOM_HAZARD_MODEL_PATH)
+                except Exception as exc:
+                    model_error = str(exc).strip() or exc.__class__.__name__
+                    app.logger.warning(
+                        "Custom hazard model could not be initialized: %s",
+                        model_error,
+                    )
+                    return None
 
     return model
+
+
+def get_object_model():
+    global object_model, object_model_error
+
+    if not OBJECT_DETECTION_ENABLED:
+        return None
+
+    if object_model is not None:
+        return object_model
+
+    if object_model_error:
+        return None
+
+    with model_lock:
+        if object_model is not None:
+            return object_model
+
+        if object_model_error:
+            return None
+
+        try:
+            from ultralytics import YOLO
+
+            object_model = YOLO(DEFAULT_OBJECT_MODEL_NAME)
+        except Exception as exc:
+            object_model_error = str(exc).strip() or exc.__class__.__name__
+            app.logger.warning(
+                "Object detection model could not be initialized: %s",
+                object_model_error,
+            )
+            return None
+
+    return object_model
+
+
+def get_detection_engines(surface_detector, object_detector):
+    engines = []
+
+    if surface_detector is None:
+        engines.append("surface heuristic analysis")
+    else:
+        engines.append("custom hazard model")
+
+    if object_detector is not None:
+        engines.append("YOLO object detection")
+    elif OBJECT_DETECTION_ENABLED and object_model_error:
+        engines.append("object detection unavailable")
+
+    return engines
 
 
 def set_analysis_job(job_id, **values):
@@ -463,6 +623,13 @@ def serialize_hazard_row(row):
     data = dict(row)
     data["severity_breakdown"] = json.loads(data["severity_breakdown"] or "{}")
     data["hazard_breakdown"] = json.loads(data["hazard_breakdown"] or "{}")
+    data["top_hazards"] = [
+        {"type": label, "count": count}
+        for label, count in sorted(
+            data["hazard_breakdown"].items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:3]
+    ]
     data["source_location"] = (data.get("source_location") or data["location_label"]).strip()
     data["confidence"] = round(float(data["confidence"]), 2)
     data["latitude"] = round(float(data["latitude"]), 6)
@@ -1264,6 +1431,58 @@ def severity_from_score(score):
     return "low"
 
 
+def sort_detections(detections, limit=None):
+    ordered = sorted(
+        detections,
+        key=lambda item: (
+            SEVERITY_ORDER[item["severity"]],
+            item["confidence"],
+        ),
+        reverse=True,
+    )
+
+    if limit is None:
+        return ordered
+
+    return ordered[:limit]
+
+
+def infer_detection_source(label):
+    normalized = normalize_hazard_type(label)
+    object_keywords = (
+        "person",
+        "pedestrian",
+        "vehicle",
+        "car",
+        "truck",
+        "bus",
+        "motorcycle",
+        "bicycle",
+        "animal",
+        "dog",
+        "cat",
+        "cow",
+        "horse",
+        "sheep",
+        "obstruction",
+    )
+
+    if any(keyword in normalized for keyword in object_keywords):
+        return OBJECT_SOURCE_LABEL
+
+    return SURFACE_SOURCE_LABEL
+
+
+def classify_surface_hazard(circularity, aspect_ratio, fill_ratio):
+    if circularity >= 0.22 and fill_ratio >= 0.34:
+        return "pothole"
+
+    if aspect_ratio >= 2.4 and fill_ratio <= 0.55:
+        return "surface crack"
+
+    return "road anomaly"
+
+
 def detect_road_anomalies(frame):
     cv2 = get_cv2()
     np = get_np()
@@ -1355,25 +1574,22 @@ def detect_road_anomalies(frame):
 
         confidence = min(0.94, 0.30 + (score / 140) + (area_ratio * 6))
         severity = severity_from_score(score + (area_ratio * 1500))
-        hazard_type = "pothole" if circularity > 0.18 else "road anomaly"
+        hazard_type = classify_surface_hazard(
+            circularity,
+            aspect_ratio,
+            fill_ratio,
+        )
 
         detections.append(
             {
                 "type": hazard_type,
                 "severity": severity,
                 "confidence": round(float(confidence), 2),
+                "source": SURFACE_SOURCE_LABEL,
             }
         )
 
-    detections.sort(
-        key=lambda item: (
-            SEVERITY_ORDER[item["severity"]],
-            item["confidence"],
-        ),
-        reverse=True,
-    )
-
-    return detections[:5]
+    return sort_detections(detections, limit=6)
 
 
 def detect_with_custom_model(frame, detector):
@@ -1403,21 +1619,83 @@ def detect_with_custom_model(frame, detector):
                     "type": normalize_hazard_type(label),
                     "severity": severity_from_score(severity_metric),
                     "confidence": round(confidence, 2),
+                    "source": infer_detection_source(label),
                 }
             )
 
-    return detections
+    return sort_detections(detections, limit=8)
 
 
-def summarize_detections(all_detections, sampled_frames):
+def detect_object_hazards(frame, detector):
+    height, width = frame.shape[:2]
+    results = detector.predict(frame, imgsz=640, conf=0.25, verbose=False, device="cpu")
+    detections = []
+
+    for result in results:
+        if result.boxes is None:
+            continue
+
+        for box in result.boxes:
+            cls = int(box.cls[0])
+            confidence = float(box.conf[0])
+
+            if isinstance(detector.names, dict):
+                label = normalize_hazard_type(detector.names.get(cls, str(cls)))
+            else:
+                label = normalize_hazard_type(detector.names[cls])
+
+            rule = OBJECT_HAZARD_RULES.get(label)
+
+            if rule is None:
+                continue
+
+            x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
+            area_ratio = max(0.0, ((x2 - x1) * (y2 - y1)) / max(height * width, 1))
+            bottom_bias = max(0.0, min(1.0, y2 / max(height, 1)))
+            lane_center = ((x1 + x2) / 2) / max(width, 1)
+            lane_bias = 1 - min(1.0, abs(lane_center - 0.5) * 2)
+
+            if bottom_bias < 0.45:
+                continue
+
+            if area_ratio < rule["min_area_ratio"] and bottom_bias < 0.72:
+                continue
+
+            severity_metric = (
+                rule["base_score"]
+                + (confidence * 22)
+                + (area_ratio * 1500)
+                + (bottom_bias * 18)
+                + (lane_bias * 10)
+            )
+
+            if severity_metric < 62:
+                continue
+
+            detections.append(
+                {
+                    "type": rule["type"],
+                    "severity": severity_from_score(severity_metric),
+                    "confidence": round(min(0.98, confidence + (area_ratio * 1.8)), 2),
+                    "source": OBJECT_SOURCE_LABEL,
+                }
+            )
+
+    return sort_detections(detections, limit=4)
+
+
+def summarize_detections(all_detections, sampled_frames, detection_engines=None):
     severity_breakdown = {"low": 0, "medium": 0, "high": 0}
     hazard_breakdown = {}
+    source_breakdown = {SURFACE_SOURCE_LABEL: 0, OBJECT_SOURCE_LABEL: 0}
     weighted_score = 0.0
     confidence_total = 0.0
 
     for detection in all_detections:
         severity_breakdown[detection["severity"]] += 1
         hazard_breakdown[detection["type"]] = hazard_breakdown.get(detection["type"], 0) + 1
+        source = detection.get("source") or SURFACE_SOURCE_LABEL
+        source_breakdown[source] = source_breakdown.get(source, 0) + 1
         weighted_score += SEVERITY_WEIGHTS[detection["severity"]]
         confidence_total += detection["confidence"]
 
@@ -1425,34 +1703,69 @@ def summarize_detections(all_detections, sampled_frames):
     average_confidence = round(confidence_total / hazard_count, 2) if hazard_count else 0.0
     average_weight = weighted_score / max(sampled_frames, 1)
     risk_score = min(100, int(round(average_weight * 18)))
+    top_hazards = [
+        {"type": label, "count": count}
+        for label, count in sorted(
+            hazard_breakdown.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:3]
+    ]
 
     if hazard_count == 0:
-        status = "No major road anomalies detected"
+        status = "No major surface damage or roadway obstacles detected"
         severity = "low"
         dominant_hazard = "road anomaly"
-    elif risk_score < 30:
-        status = "Minor surface anomalies detected"
-        severity = "low"
-        dominant_hazard = max(hazard_breakdown, key=hazard_breakdown.get)
-    elif risk_score < 60:
-        status = "Caution: uneven road conditions"
-        severity = "medium"
-        dominant_hazard = max(hazard_breakdown, key=hazard_breakdown.get)
     else:
-        status = "High hazard exposure on this road segment"
-        severity = "high"
         dominant_hazard = max(hazard_breakdown, key=hazard_breakdown.get)
+        object_count = source_breakdown.get(OBJECT_SOURCE_LABEL, 0)
+        surface_count = source_breakdown.get(SURFACE_SOURCE_LABEL, 0)
+
+        if object_count and surface_count:
+            if risk_score < 35:
+                status = "Mixed surface and obstacle hazards detected"
+                severity = "low"
+            elif risk_score < 65:
+                status = "Multiple surface and roadway object hazards detected"
+                severity = "medium"
+            else:
+                status = "High surface damage and roadway obstacle exposure"
+                severity = "high"
+        elif object_count:
+            if risk_score < 35:
+                status = "Minor roadway object hazards detected"
+                severity = "low"
+            elif risk_score < 65:
+                status = "Caution: roadway obstacles detected"
+                severity = "medium"
+            else:
+                status = "High roadway obstacle exposure"
+                severity = "high"
+        else:
+            if risk_score < 30:
+                status = "Minor surface anomalies detected"
+                severity = "low"
+            elif risk_score < 60:
+                status = "Caution: uneven road conditions"
+                severity = "medium"
+            else:
+                status = "High hazard exposure on this road segment"
+                severity = "high"
 
     return {
         "hazard_count": hazard_count,
+        "surface_hazard_count": source_breakdown.get(SURFACE_SOURCE_LABEL, 0),
+        "object_hazard_count": source_breakdown.get(OBJECT_SOURCE_LABEL, 0),
         "severity_breakdown": severity_breakdown,
         "hazard_breakdown": hazard_breakdown,
+        "source_breakdown": source_breakdown,
         "risk_score": risk_score,
         "status": status,
         "severity": severity,
         "dominant_hazard": dominant_hazard,
+        "top_hazards": top_hazards,
         "average_confidence": average_confidence,
         "frames_analyzed": sampled_frames,
+        "detection_engines": detection_engines or [],
     }
 
 
@@ -1479,6 +1792,8 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
             raise ValueError("The server could not read that video file.")
 
         detector = get_model()
+        object_detector = get_object_model()
+        detection_engines = get_detection_engines(detector, object_detector)
         fps = cap.get(cv2.CAP_PROP_FPS)
         fps = fps if fps and fps > 0 else 24
         frame_interval = max(int(round(fps)), 12)
@@ -1490,7 +1805,7 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
         set_analysis_job(
             job_id,
             status="processing",
-            message="Scanning the road surface for potholes and anomalies...",
+            message="Scanning road surface damage and roadway obstacles...",
         )
 
         while sampled_frames < max_frames:
@@ -1504,10 +1819,14 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
             frame_index += frame_interval
             frame = resize_frame(frame)
 
-            if detector is None:
-                detections = detect_road_anomalies(frame)
-            else:
-                detections = detect_with_custom_model(frame, detector)
+            detections = (
+                detect_road_anomalies(frame)
+                if detector is None
+                else detect_with_custom_model(frame, detector)
+            )
+
+            if object_detector is not None:
+                detections.extend(detect_object_hazards(frame, object_detector))
 
             all_detections.extend(detections)
 
@@ -1515,13 +1834,17 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
                 set_analysis_job(
                     job_id,
                     status="processing",
-                    message=f"Analyzed {sampled_frames} frames so far...",
+                    message=f"Analyzed {sampled_frames} frames for surface damage and obstacles so far...",
                 )
 
         if sampled_frames == 0:
             raise ValueError("No readable frames were found in the uploaded video.")
 
-        summary = summarize_detections(all_detections, sampled_frames)
+        summary = summarize_detections(
+            all_detections,
+            sampled_frames,
+            detection_engines=detection_engines,
+        )
         record = None
 
         if summary["hazard_count"] > 0:
@@ -1545,6 +1868,18 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
                     "latitude": round(coordinates[0], 6),
                     "longitude": round(coordinates[1], 6),
                 },
+                "surface_detection_status": (
+                    "custom-model"
+                    if detector is not None
+                    else ("fallback-heuristic" if model_error else "heuristic")
+                ),
+                "surface_detection_error": model_error if detector is None else "",
+                "object_detection_status": (
+                    "active"
+                    if object_detector is not None
+                    else ("unavailable" if OBJECT_DETECTION_ENABLED else "disabled")
+                ),
+                "object_detection_error": object_model_error if object_detector is None else "",
                 "record": record,
             },
         )
@@ -1637,7 +1972,8 @@ def score_route_against_hazards(route_coords, hazards):
         proximity = 1 - (distance / HAZARD_INFLUENCE_KM)
         severity_factor = {"low": 0.55, "medium": 1.0, "high": 1.45}[hazard["severity"]]
         risk_factor = max(0.45, hazard["risk_score"] / 100)
-        impact = 9.0 * severity_factor * (0.45 + proximity) * risk_factor
+        recency_factor = hazard_recency_factor(hazard.get("created_at"))
+        impact = 9.0 * severity_factor * (0.45 + proximity) * risk_factor * recency_factor
         penalty += impact
 
         impacts.append(
@@ -1648,6 +1984,7 @@ def score_route_against_hazards(route_coords, hazards):
                 "distance_km": round(distance, 2),
                 "risk_score": hazard["risk_score"],
                 "hazard_type": hazard["hazard_type"],
+                "recency_factor": round(recency_factor, 2),
             }
         )
 
