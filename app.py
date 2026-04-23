@@ -1,3 +1,55 @@
+import os
+
+from flask import Flask
+
+from config import UPLOAD_FOLDER
+from db import init_db
+from routes.api import api_bp
+from routes.web import web_bp
+
+
+def create_app():
+    app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    init_db()
+    app.register_blueprint(web_bp)
+    app.register_blueprint(api_bp)
+    return app
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+import os
+
+from flask import Flask
+
+from config import UPLOAD_FOLDER
+from db import init_db
+from routes.api import api_bp
+from routes.web import web_bp
+
+
+def create_app():
+    app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    init_db()
+    app.register_blueprint(web_bp)
+    app.register_blueprint(api_bp)
+    return app
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 import copy
 import json
 import math
@@ -103,62 +155,75 @@ OBJECT_DETECTION_ENABLED = os.getenv(
 OBJECT_HAZARD_RULES = {
     "person": {
         "type": "pedestrian obstruction",
-        "base_score": 76,
-        "min_area_ratio": 0.004,
+        "base_score": 70,
+        "min_area_ratio": 0.006,
+        "min_bottom_bias": 0.52,
     },
     "bicycle": {
         "type": "cycle obstruction",
-        "base_score": 66,
-        "min_area_ratio": 0.006,
+        "base_score": 56,
+        "min_area_ratio": 0.012,
+        "min_bottom_bias": 0.62,
     },
     "motorcycle": {
         "type": "two wheeler obstruction",
-        "base_score": 70,
-        "min_area_ratio": 0.008,
+        "base_score": 60,
+        "min_area_ratio": 0.014,
+        "min_bottom_bias": 0.64,
     },
     "car": {
         "type": "vehicle obstruction",
-        "base_score": 62,
-        "min_area_ratio": 0.02,
+        "base_score": 48,
+        "min_area_ratio": 0.04,
+        "min_bottom_bias": 0.7,
     },
     "bus": {
         "type": "heavy vehicle obstruction",
-        "base_score": 75,
-        "min_area_ratio": 0.016,
+        "base_score": 58,
+        "min_area_ratio": 0.03,
+        "min_bottom_bias": 0.68,
     },
     "truck": {
         "type": "heavy vehicle obstruction",
-        "base_score": 78,
-        "min_area_ratio": 0.016,
+        "base_score": 62,
+        "min_area_ratio": 0.03,
+        "min_bottom_bias": 0.68,
     },
     "dog": {
         "type": "stray animal",
         "base_score": 74,
         "min_area_ratio": 0.003,
+        "min_bottom_bias": 0.46,
     },
     "cat": {
         "type": "stray animal",
         "base_score": 64,
         "min_area_ratio": 0.002,
+        "min_bottom_bias": 0.46,
     },
     "cow": {
         "type": "stray animal",
         "base_score": 82,
         "min_area_ratio": 0.008,
+        "min_bottom_bias": 0.48,
     },
     "horse": {
         "type": "stray animal",
         "base_score": 80,
         "min_area_ratio": 0.008,
+        "min_bottom_bias": 0.48,
     },
     "sheep": {
         "type": "stray animal",
         "base_score": 68,
         "min_area_ratio": 0.003,
+        "min_bottom_bias": 0.46,
     },
 }
 SURFACE_SOURCE_LABEL = "surface"
 OBJECT_SOURCE_LABEL = "object"
+MAX_SURFACE_DETECTIONS_PER_FRAME = 3
+MAX_OBJECT_DETECTIONS_PER_FRAME = 2
 INCIDENT_SERVICE_PROFILES = {
     "accident": [
         "Simulated Ambulance Dispatch",
@@ -1487,8 +1552,9 @@ def detect_road_anomalies(frame):
     cv2 = get_cv2()
     np = get_np()
     height, width = frame.shape[:2]
-    roi_top = int(height * 0.45)
-    roi = frame[roi_top:, :]
+    roi_top = int(height * 0.55)
+    lateral_margin = int(width * 0.08)
+    roi = frame[roi_top:, lateral_margin : max(width - lateral_margin, lateral_margin + 1)]
 
     if roi.size == 0:
         return []
@@ -1539,18 +1605,18 @@ def detect_road_anomalies(frame):
     for contour in contours:
         area = cv2.contourArea(contour)
 
-        if area < 180 or area > roi_area * 0.12:
+        if area < 260 or area > roi_area * 0.08:
             continue
 
         x, y, box_width, box_height = cv2.boundingRect(contour)
         aspect_ratio = box_width / max(box_height, 1)
 
-        if aspect_ratio < 0.35 or aspect_ratio > 4.5:
+        if aspect_ratio < 0.5 or aspect_ratio > 3.2:
             continue
 
         fill_ratio = area / max(box_width * box_height, 1)
 
-        if fill_ratio < 0.18 or fill_ratio > 0.95:
+        if fill_ratio < 0.24 or fill_ratio > 0.84:
             continue
 
         perimeter = cv2.arcLength(contour, True)
@@ -1558,38 +1624,59 @@ def detect_road_anomalies(frame):
         if perimeter <= 0:
             continue
 
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+
+        if hull_area <= 0:
+            continue
+
+        solidity = area / hull_area
+
+        if solidity < 0.3 or solidity > 0.96:
+            continue
+
         circularity = 4 * math.pi * area / (perimeter * perimeter)
-        center_bias = (y + (box_height / 2)) / max(roi.shape[0], 1)
+        vertical_bias = (y + (box_height / 2)) / max(roi.shape[0], 1)
+        lane_center = (x + (box_width / 2)) / max(roi.shape[1], 1)
+        lane_bias = 1 - min(1.0, abs(lane_center - 0.5) * 2)
         contour_mask = np.zeros_like(enhanced)
         cv2.drawContours(contour_mask, [contour], -1, 255, -1)
 
         darkness = 255 - cv2.mean(enhanced, mask=contour_mask)[0]
         edge_strength = cv2.mean(gradient, mask=contour_mask)[0]
         area_ratio = area / roi_area
-        score = darkness * 0.55 + edge_strength * 0.3 + center_bias * 20
-        score += min(25, area / 150)
+        score = darkness * 0.36 + edge_strength * 0.34
+        score += vertical_bias * 18
+        score += lane_bias * 14
+        score += min(16, area / 220)
 
-        if score < 55:
+        if darkness < 40 or edge_strength < 16:
             continue
 
-        confidence = min(0.94, 0.30 + (score / 140) + (area_ratio * 6))
-        severity = severity_from_score(score + (area_ratio * 1500))
+        if score < 78:
+            continue
+
+        confidence = min(0.9, 0.18 + (score / 180) + (area_ratio * 4.4))
+        severity_metric = score + (area_ratio * 1200) + (lane_bias * 10)
         hazard_type = classify_surface_hazard(
             circularity,
             aspect_ratio,
             fill_ratio,
         )
 
+        if hazard_type == "road anomaly" and severity_metric < 92:
+            continue
+
         detections.append(
             {
                 "type": hazard_type,
-                "severity": severity,
+                "severity": severity_from_score(severity_metric),
                 "confidence": round(float(confidence), 2),
                 "source": SURFACE_SOURCE_LABEL,
             }
         )
 
-    return sort_detections(detections, limit=6)
+    return sort_detections(detections, limit=MAX_SURFACE_DETECTIONS_PER_FRAME)
 
 
 def detect_with_custom_model(frame, detector):
@@ -1655,33 +1742,36 @@ def detect_object_hazards(frame, detector):
             lane_center = ((x1 + x2) / 2) / max(width, 1)
             lane_bias = 1 - min(1.0, abs(lane_center - 0.5) * 2)
 
-            if bottom_bias < 0.45:
+            if bottom_bias < rule.get("min_bottom_bias", 0.45):
                 continue
 
-            if area_ratio < rule["min_area_ratio"] and bottom_bias < 0.72:
+            if area_ratio < rule["min_area_ratio"] and bottom_bias < max(0.76, rule.get("min_bottom_bias", 0.45) + 0.08):
+                continue
+
+            if lane_bias < 0.2 and area_ratio < rule["min_area_ratio"] * 1.5:
                 continue
 
             severity_metric = (
                 rule["base_score"]
                 + (confidence * 22)
-                + (area_ratio * 1500)
-                + (bottom_bias * 18)
-                + (lane_bias * 10)
+                + (area_ratio * 1350)
+                + (bottom_bias * 16)
+                + (lane_bias * 8)
             )
 
-            if severity_metric < 62:
+            if severity_metric < 74:
                 continue
 
             detections.append(
                 {
                     "type": rule["type"],
                     "severity": severity_from_score(severity_metric),
-                    "confidence": round(min(0.98, confidence + (area_ratio * 1.8)), 2),
+                    "confidence": round(min(0.95, confidence + (area_ratio * 1.2)), 2),
                     "source": OBJECT_SOURCE_LABEL,
                 }
             )
 
-    return sort_detections(detections, limit=4)
+    return sort_detections(detections, limit=MAX_OBJECT_DETECTIONS_PER_FRAME)
 
 
 def summarize_detections(all_detections, sampled_frames, detection_engines=None):
