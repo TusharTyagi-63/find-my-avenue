@@ -196,6 +196,19 @@ HAZARD_CACHE_TTL_SECONDS = 20
 ANALYSIS_JOB_TTL_SECONDS = 60 * 60
 TRAFFIC_TILE_CACHE_SECONDS = 45
 
+# Hazard analysis performance knobs (feature-complete defaults).
+HAZARD_MAX_FRAMES = max(6, int(os.getenv("HAZARD_MAX_FRAMES", "18")))
+HAZARD_MIN_FRAME_INTERVAL = max(6, int(os.getenv("HAZARD_MIN_FRAME_INTERVAL", "12")))
+HAZARD_RESIZE_WIDTH = max(480, int(os.getenv("HAZARD_RESIZE_WIDTH", "720")))
+HAZARD_MIN_BRIGHTNESS_STD = max(
+    2.0,
+    float(os.getenv("HAZARD_MIN_BRIGHTNESS_STD", "10.0")),
+)
+HAZARD_MIN_FRAME_DIFF = max(
+    0.1,
+    float(os.getenv("HAZARD_MIN_FRAME_DIFF", "2.0")),
+)
+
 ORS_API_KEY = os.getenv("ORS_API_KEY")
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")

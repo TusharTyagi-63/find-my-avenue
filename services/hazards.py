@@ -9,6 +9,11 @@ from config import (
     ANALYSIS_JOB_TTL_SECONDS,
     CUSTOM_HAZARD_MODEL_PATH,
     DEFAULT_OBJECT_MODEL_NAME,
+    HAZARD_MAX_FRAMES,
+    HAZARD_MIN_BRIGHTNESS_STD,
+    HAZARD_MIN_FRAME_DIFF,
+    HAZARD_MIN_FRAME_INTERVAL,
+    HAZARD_RESIZE_WIDTH,
     MAX_OBJECT_DETECTIONS_PER_FRAME,
     MAX_SURFACE_DETECTIONS_PER_FRAME,
     OBJECT_DETECTION_ENABLED,
@@ -74,6 +79,23 @@ def resize_frame(frame, max_width=720):
     scale = max_width / width
     new_height = max(1, int(height * scale))
     return cv2.resize(frame, (max_width, new_height))
+
+
+def frame_has_enough_signal(frame, previous_gray=None):
+    """Skip near-blank or near-duplicate frames to reduce redundant inference."""
+    cv2 = get_cv2()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    brightness_std = float(gray.std())
+
+    if brightness_std < HAZARD_MIN_BRIGHTNESS_STD:
+        return False, gray
+
+    if previous_gray is not None:
+        frame_diff = float(cv2.absdiff(gray, previous_gray).mean())
+        if frame_diff < HAZARD_MIN_FRAME_DIFF:
+            return False, gray
+
+    return True, gray
 
 
 def get_model():
@@ -325,6 +347,7 @@ def summarize_detections(all_detections, sampled_frames, detection_engines=None)
 def analyze_saved_video(job_id, path, location_label, source_location, notes):
     cv2 = get_cv2()
     cap = None
+    started_at = monotonic()
     try:
         coordinates = parse_location(location_label)
         source_location = (source_location or location_label).strip()
@@ -339,20 +362,35 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
         detection_engines = get_detection_engines(detector, object_detector)
         fps = cap.get(cv2.CAP_PROP_FPS)
         fps = fps if fps and fps > 0 else 24
-        frame_interval = max(int(round(fps)), 12)
-        max_frames = 18
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        dynamic_interval = int(round(fps * 1.1))
+        if total_frames > 0:
+            dynamic_interval = max(dynamic_interval, total_frames // max(HAZARD_MAX_FRAMES, 1))
+        frame_interval = max(dynamic_interval, HAZARD_MIN_FRAME_INTERVAL)
+        max_frames = HAZARD_MAX_FRAMES
         frame_index = 0
         sampled_frames = 0
+        scanned_frames = 0
+        skipped_frames = 0
         all_detections = []
+        previous_gray = None
         set_analysis_job(job_id, status="processing", message="Scanning road surface damage and roadway obstacles...")
         while sampled_frames < max_frames:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
             ret, frame = cap.read()
             if not ret:
                 break
-            sampled_frames += 1
+            scanned_frames += 1
             frame_index += frame_interval
-            frame = resize_frame(frame)
+            frame = resize_frame(frame, max_width=HAZARD_RESIZE_WIDTH)
+            has_signal, current_gray = frame_has_enough_signal(frame, previous_gray=previous_gray)
+            previous_gray = current_gray
+
+            if not has_signal:
+                skipped_frames += 1
+                continue
+
+            sampled_frames += 1
             detections = detect_road_anomalies(frame) if detector is None else detect_with_custom_model(frame, detector)
             if object_detector is not None:
                 detections.extend(detect_object_hazards(frame, object_detector))
@@ -381,8 +419,25 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
                 "surface_detection_error": model_error if detector is None else "",
                 "object_detection_status": "active" if object_detector is not None else ("unavailable" if OBJECT_DETECTION_ENABLED else "disabled"),
                 "object_detection_error": object_model_error if object_detector is None else "",
+                "analysis_metrics": {
+                    "elapsed_seconds": round(monotonic() - started_at, 2),
+                    "scanned_frames": scanned_frames,
+                    "used_frames": sampled_frames,
+                    "skipped_frames": skipped_frames,
+                    "frame_interval": frame_interval,
+                },
                 "record": record,
             },
+        )
+        logger.info(
+            "Hazard analysis completed in %.2fs (job=%s scanned=%s used=%s skipped=%s interval=%s detections=%s)",
+            monotonic() - started_at,
+            job_id,
+            scanned_frames,
+            sampled_frames,
+            skipped_frames,
+            frame_interval,
+            len(all_detections),
         )
     except ValueError as exc:
         set_analysis_job(job_id, status="failed", error=str(exc))
