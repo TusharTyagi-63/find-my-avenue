@@ -13,7 +13,11 @@ from config import (
     HAZARD_MIN_BRIGHTNESS_STD,
     HAZARD_MIN_FRAME_DIFF,
     HAZARD_MIN_FRAME_INTERVAL,
+    HAZARD_OBJECT_EVERY_N_FRAMES,
     HAZARD_RESIZE_WIDTH,
+    HAZARD_YOLO_DEVICE,
+    HAZARD_YOLO_HALF,
+    HAZARD_YOLO_IMGSZ,
     MAX_OBJECT_DETECTIONS_PER_FRAME,
     MAX_SURFACE_DETECTIONS_PER_FRAME,
     OBJECT_DETECTION_ENABLED,
@@ -36,6 +40,43 @@ object_model_error = None
 analysis_jobs = {}
 analysis_lock = threading.Lock()
 model_lock = threading.Lock()
+_yolo_device_cached = None
+
+
+def _resolve_yolo_device():
+    """Pick YOLO device once per process: explicit env, else CUDA, MPS, or CPU."""
+    global _yolo_device_cached
+    if _yolo_device_cached is not None:
+        return _yolo_device_cached
+    if HAZARD_YOLO_DEVICE:
+        _yolo_device_cached = HAZARD_YOLO_DEVICE
+        return _yolo_device_cached
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            _yolo_device_cached = 0
+        elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            _yolo_device_cached = "mps"
+        else:
+            _yolo_device_cached = "cpu"
+    except Exception:
+        _yolo_device_cached = "cpu"
+    return _yolo_device_cached
+
+
+def _yolo_predict(detector, frame):
+    device = _resolve_yolo_device()
+    kwargs = {
+        "imgsz": HAZARD_YOLO_IMGSZ,
+        "conf": 0.25,
+        "verbose": False,
+        "device": device,
+    }
+    use_half = HAZARD_YOLO_HALF and device not in ("cpu", "mps")
+    if use_half:
+        kwargs["half"] = True
+    return detector.predict(frame, **kwargs)
 
 
 def cleanup_analysis_jobs(now=None):
@@ -246,7 +287,7 @@ def detect_road_anomalies(frame):
 
 def detect_with_custom_model(frame, detector):
     height, width = frame.shape[:2]
-    results = detector.predict(frame, imgsz=640, conf=0.25, verbose=False, device="cpu")
+    results = _yolo_predict(detector, frame)
     detections = []
     for result in results:
         if result.boxes is None:
@@ -264,7 +305,7 @@ def detect_with_custom_model(frame, detector):
 
 def detect_object_hazards(frame, detector):
     height, width = frame.shape[:2]
-    results = detector.predict(frame, imgsz=640, conf=0.25, verbose=False, device="cpu")
+    results = _yolo_predict(detector, frame)
     detections = []
     for result in results:
         if result.boxes is None:
@@ -392,7 +433,7 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
 
             sampled_frames += 1
             detections = detect_road_anomalies(frame) if detector is None else detect_with_custom_model(frame, detector)
-            if object_detector is not None:
+            if object_detector is not None and (sampled_frames - 1) % HAZARD_OBJECT_EVERY_N_FRAMES == 0:
                 detections.extend(detect_object_hazards(frame, object_detector))
             all_detections.extend(detections)
             if sampled_frames % 4 == 0:
@@ -425,6 +466,9 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
                     "used_frames": sampled_frames,
                     "skipped_frames": skipped_frames,
                     "frame_interval": frame_interval,
+                    "yolo_device": str(_resolve_yolo_device()),
+                    "yolo_imgsz": HAZARD_YOLO_IMGSZ,
+                    "object_every_n_frames": HAZARD_OBJECT_EVERY_N_FRAMES,
                 },
                 "record": record,
             },

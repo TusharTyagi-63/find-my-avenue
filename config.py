@@ -196,10 +196,12 @@ HAZARD_CACHE_TTL_SECONDS = 20
 ANALYSIS_JOB_TTL_SECONDS = 60 * 60
 TRAFFIC_TILE_CACHE_SECONDS = 45
 
-# Hazard analysis performance knobs (feature-complete defaults).
-HAZARD_MAX_FRAMES = max(6, int(os.getenv("HAZARD_MAX_FRAMES", "18")))
+# Hazard analysis performance knobs.
+# Speed: lower HAZARD_MAX_FRAMES, raise HAZARD_MIN_FRAME_INTERVAL, lower HAZARD_YOLO_IMGSZ,
+# raise HAZARD_OBJECT_EVERY_N_FRAMES (skip object YOLO on some frames), set HAZARD_YOLO_DEVICE=cuda:0 if available.
+HAZARD_MAX_FRAMES = max(6, int(os.getenv("HAZARD_MAX_FRAMES", "12")))
 HAZARD_MIN_FRAME_INTERVAL = max(6, int(os.getenv("HAZARD_MIN_FRAME_INTERVAL", "12")))
-HAZARD_RESIZE_WIDTH = max(480, int(os.getenv("HAZARD_RESIZE_WIDTH", "720")))
+HAZARD_RESIZE_WIDTH = max(480, int(os.getenv("HAZARD_RESIZE_WIDTH", "640")))
 HAZARD_MIN_BRIGHTNESS_STD = max(
     2.0,
     float(os.getenv("HAZARD_MIN_BRIGHTNESS_STD", "10.0")),
@@ -208,6 +210,14 @@ HAZARD_MIN_FRAME_DIFF = max(
     0.1,
     float(os.getenv("HAZARD_MIN_FRAME_DIFF", "2.0")),
 )
+# Ultralytics: smaller imgsz is faster; 512 is a good speed/quality tradeoff on CPU/GPU.
+HAZARD_YOLO_IMGSZ = max(320, min(1280, int(os.getenv("HAZARD_YOLO_IMGSZ", "512"))))
+# Run COCO/object YOLO every N-th analyzed frame (1 = every frame). Surface/custom model still runs every frame.
+HAZARD_OBJECT_EVERY_N_FRAMES = max(1, int(os.getenv("HAZARD_OBJECT_EVERY_N_FRAMES", "2")))
+# Empty = auto (CUDA if available, else Apple MPS, else CPU). Examples: "cpu", "0", "cuda:0", "mps"
+HAZARD_YOLO_DEVICE = os.getenv("HAZARD_YOLO_DEVICE", "").strip()
+# FP16 on CUDA only; set HAZARD_YOLO_HALF=1 when using a GPU for a further speedup.
+HAZARD_YOLO_HALF = os.getenv("HAZARD_YOLO_HALF", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 ORS_API_KEY = os.getenv("ORS_API_KEY")
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
