@@ -147,12 +147,23 @@ def simplify_route_coords(coords, max_points=90):
 def score_route_against_hazards(route_coords, hazards):
     simplified = simplify_route_coords(route_coords)
     if len(simplified) < 2:
-        return {"safety_score": 100.0, "hazard_count": 0, "safety_label": "No saved hazards nearby", "nearby_hazards": [], "penalty": 0.0}
+        return {
+            "safety_score": 100.0,
+            "hazard_count": 0,
+            "safety_label": "No saved hazards nearby",
+            "nearby_hazards": [],
+            "penalty": 0.0,
+            "nearest_hazard_km": None,
+            "saved_hazards_considered": len(hazards),
+        }
     impacts = []
     penalty = 0.0
+    nearest_distance = None
     for hazard in hazards:
         hazard_point = (hazard["latitude"], hazard["longitude"])
         distance = min(point_to_segment_distance_km(hazard_point, start, end) for start, end in zip(simplified[:-1], simplified[1:]))
+        if nearest_distance is None or distance < nearest_distance:
+            nearest_distance = distance
         if distance > HAZARD_INFLUENCE_KM:
             continue
         proximity = 1 - (distance / HAZARD_INFLUENCE_KM)
@@ -174,12 +185,21 @@ def score_route_against_hazards(route_coords, hazards):
         )
     impacts.sort(key=lambda item: item["distance_km"])
     if not impacts:
+        nearest_label = None
+        if nearest_distance is not None:
+            nearest_label = f"No hazards within {HAZARD_INFLUENCE_KM:.1f} km (nearest {nearest_distance:.1f} km)"
         return {
             "safety_score": 100.0,
             "hazard_count": 0,
-            "safety_label": "No saved hazards nearby" if hazards else "No saved hazard reports yet",
+            "safety_label": (
+                nearest_label
+                if hazards and nearest_label
+                else ("No saved hazards nearby" if hazards else "No saved hazard reports yet")
+            ),
             "nearby_hazards": [],
             "penalty": 0.0,
+            "nearest_hazard_km": round(nearest_distance, 2) if nearest_distance is not None else None,
+            "saved_hazards_considered": len(hazards),
         }
     safety_score = max(5, round(100 - min(85, penalty * 4), 1))
     if safety_score >= 75:
@@ -188,7 +208,15 @@ def score_route_against_hazards(route_coords, hazards):
         safety_label = "Use caution"
     else:
         safety_label = "Avoid if possible"
-    return {"safety_score": safety_score, "hazard_count": len(impacts), "safety_label": safety_label, "nearby_hazards": impacts[:5], "penalty": round(penalty, 2)}
+    return {
+        "safety_score": safety_score,
+        "hazard_count": len(impacts),
+        "safety_label": safety_label,
+        "nearby_hazards": impacts[:5],
+        "penalty": round(penalty, 2),
+        "nearest_hazard_km": round(nearest_distance, 2) if nearest_distance is not None else None,
+        "saved_hazards_considered": len(hazards),
+    }
 
 
 def enrich_routes_with_hazards(routes):

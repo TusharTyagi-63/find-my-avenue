@@ -214,7 +214,8 @@ def infer_detection_source(label):
 
 
 def classify_surface_hazard(circularity, aspect_ratio, fill_ratio):
-    if circularity >= 0.22 and fill_ratio >= 0.34:
+    # Slightly lower circularity/fill thresholds to improve pothole sensitivity.
+    if circularity >= 0.2 and fill_ratio >= 0.3:
         return "pothole"
     if aspect_ratio >= 2.4 and fill_ratio <= 0.55:
         return "surface crack"
@@ -328,7 +329,14 @@ def detect_object_hazards(frame, detector):
                 continue
             if lane_bias < 0.2 and area_ratio < rule["min_area_ratio"] * 1.5:
                 continue
-            severity_metric = rule["base_score"] + (confidence * 22) + (area_ratio * 1350) + (bottom_bias * 16) + (lane_bias * 8)
+            risk_weight = float(rule.get("risk_weight", 1.0))
+            severity_metric = (
+                rule["base_score"]
+                + (confidence * 22)
+                + (area_ratio * 1350)
+                + (bottom_bias * 16)
+                + (lane_bias * 8)
+            ) * risk_weight
             if severity_metric < 74:
                 continue
             detections.append({"type": rule["type"], "severity": severity_from_score(severity_metric), "confidence": round(min(0.95, confidence + (area_ratio * 1.2)), 2), "source": OBJECT_SOURCE_LABEL})
@@ -417,12 +425,13 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
         previous_gray = None
         set_analysis_job(job_id, status="processing", message="Scanning road surface damage and roadway obstacles...")
         while sampled_frames < max_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
             ret, frame = cap.read()
             if not ret:
                 break
+            frame_index += 1
+            if frame_index % frame_interval != 0:
+                continue
             scanned_frames += 1
-            frame_index += frame_interval
             frame = resize_frame(frame, max_width=HAZARD_RESIZE_WIDTH)
             has_signal, current_gray = frame_has_enough_signal(frame, previous_gray=previous_gray)
             previous_gray = current_gray

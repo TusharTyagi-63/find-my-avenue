@@ -13,7 +13,9 @@ INSTANCE_FOLDER = os.path.join(BASE_DIR, "instance")
 DATABASE_PATH = os.path.join(INSTANCE_FOLDER, "find_my_avenue.db")
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "uploads")
 
-HAZARD_INFLUENCE_KM = 0.4
+# How close a saved hazard must be to a route segment to be considered "nearby".
+# Increase this if routes rarely show nearby hazards on sparse hazard maps.
+HAZARD_INFLUENCE_KM = float(os.getenv("HAZARD_INFLUENCE_KM", "1.2"))
 ROUTE_COLORS = ["#38bdf8", "#6366f1", "#94a3b8"]
 ROUTE_MODES = {
     "drive": {"profile": "driving-car", "label": "Drive"},
@@ -91,66 +93,77 @@ OBJECT_HAZARD_RULES = {
         "base_score": 70,
         "min_area_ratio": 0.006,
         "min_bottom_bias": 0.52,
+        "risk_weight": 1.2,
     },
     "bicycle": {
         "type": "cycle obstruction",
         "base_score": 56,
         "min_area_ratio": 0.012,
         "min_bottom_bias": 0.62,
+        "risk_weight": 0.9,
     },
     "motorcycle": {
         "type": "two wheeler obstruction",
         "base_score": 60,
         "min_area_ratio": 0.014,
         "min_bottom_bias": 0.64,
+        "risk_weight": 1.25,
     },
     "car": {
         "type": "vehicle obstruction",
         "base_score": 48,
         "min_area_ratio": 0.04,
         "min_bottom_bias": 0.7,
+        "risk_weight": 1.0,
     },
     "bus": {
         "type": "heavy vehicle obstruction",
         "base_score": 58,
         "min_area_ratio": 0.03,
         "min_bottom_bias": 0.68,
+        "risk_weight": 1.35,
     },
     "truck": {
         "type": "heavy vehicle obstruction",
         "base_score": 62,
         "min_area_ratio": 0.03,
         "min_bottom_bias": 0.68,
+        "risk_weight": 1.45,
     },
     "dog": {
         "type": "stray animal",
         "base_score": 74,
         "min_area_ratio": 0.003,
         "min_bottom_bias": 0.46,
+        "risk_weight": 1.1,
     },
     "cat": {
         "type": "stray animal",
         "base_score": 64,
         "min_area_ratio": 0.002,
         "min_bottom_bias": 0.46,
+        "risk_weight": 0.95,
     },
     "cow": {
         "type": "stray animal",
         "base_score": 82,
         "min_area_ratio": 0.008,
         "min_bottom_bias": 0.48,
+        "risk_weight": 1.5,
     },
     "horse": {
         "type": "stray animal",
         "base_score": 80,
         "min_area_ratio": 0.008,
         "min_bottom_bias": 0.48,
+        "risk_weight": 1.35,
     },
     "sheep": {
         "type": "stray animal",
         "base_score": 68,
         "min_area_ratio": 0.003,
         "min_bottom_bias": 0.46,
+        "risk_weight": 1.05,
     },
 }
 SURFACE_SOURCE_LABEL = "surface"
@@ -199,8 +212,8 @@ TRAFFIC_TILE_CACHE_SECONDS = 45
 # Hazard analysis performance knobs.
 # Speed: lower HAZARD_MAX_FRAMES, raise HAZARD_MIN_FRAME_INTERVAL, lower HAZARD_YOLO_IMGSZ,
 # raise HAZARD_OBJECT_EVERY_N_FRAMES (skip object YOLO on some frames), set HAZARD_YOLO_DEVICE=cuda:0 if available.
-HAZARD_MAX_FRAMES = max(6, int(os.getenv("HAZARD_MAX_FRAMES", "12")))
-HAZARD_MIN_FRAME_INTERVAL = max(6, int(os.getenv("HAZARD_MIN_FRAME_INTERVAL", "12")))
+HAZARD_MAX_FRAMES = max(6, int(os.getenv("HAZARD_MAX_FRAMES", "8")))
+HAZARD_MIN_FRAME_INTERVAL = max(6, int(os.getenv("HAZARD_MIN_FRAME_INTERVAL", "15")))
 HAZARD_RESIZE_WIDTH = max(480, int(os.getenv("HAZARD_RESIZE_WIDTH", "640")))
 HAZARD_MIN_BRIGHTNESS_STD = max(
     2.0,
@@ -210,10 +223,10 @@ HAZARD_MIN_FRAME_DIFF = max(
     0.1,
     float(os.getenv("HAZARD_MIN_FRAME_DIFF", "2.0")),
 )
-# Ultralytics: smaller imgsz is faster; 512 is a good speed/quality tradeoff on CPU/GPU.
-HAZARD_YOLO_IMGSZ = max(320, min(1280, int(os.getenv("HAZARD_YOLO_IMGSZ", "512"))))
+# Ultralytics: smaller imgsz is faster; 416 favors speed on CPU deployments.
+HAZARD_YOLO_IMGSZ = max(320, min(1280, int(os.getenv("HAZARD_YOLO_IMGSZ", "416"))))
 # Run COCO/object YOLO every N-th analyzed frame (1 = every frame). Surface/custom model still runs every frame.
-HAZARD_OBJECT_EVERY_N_FRAMES = max(1, int(os.getenv("HAZARD_OBJECT_EVERY_N_FRAMES", "2")))
+HAZARD_OBJECT_EVERY_N_FRAMES = max(1, int(os.getenv("HAZARD_OBJECT_EVERY_N_FRAMES", "3")))
 # Empty = auto (CUDA if available, else Apple MPS, else CPU). Examples: "cpu", "0", "cuda:0", "mps"
 HAZARD_YOLO_DEVICE = os.getenv("HAZARD_YOLO_DEVICE", "").strip()
 # FP16 on CUDA only; set HAZARD_YOLO_HALF=1 when using a GPU for a further speedup.

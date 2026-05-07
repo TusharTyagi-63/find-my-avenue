@@ -525,6 +525,7 @@ lead + (index + 1) +
 " | Duration " + formatDurationMinutes(route.duration) +
 " | Safety " + route.safety_score +
 " | Nearby Hazards " + route.hazard_count +
+" | Nearest " + (route.nearest_hazard_km == null ? "-" : (route.nearest_hazard_km + " km")) +
 " | " + route.safety_label
 );
 
