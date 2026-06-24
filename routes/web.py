@@ -23,6 +23,11 @@ def emergency():
     return render_template("emergency.html")
 
 
+@web_bp.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
 @web_bp.app_errorhandler(413)
 def request_entity_too_large(_error):
     return jsonify({"error": "Video is too large. Upload a clip under 50 MB."}), 413
