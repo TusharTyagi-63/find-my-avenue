@@ -23,6 +23,14 @@ def parse_recipient_numbers(raw_value):
         if cleaned.startswith("+") and re.fullmatch(r"\+[1-9]\d{7,14}", cleaned):
             recipients.append(cleaned)
             continue
+        # 10-digit Indian mobile numbers (starting with 6, 7, 8, or 9)
+        if re.fullmatch(r"[6-9]\d{9}", cleaned):
+            recipients.append(f"+91{cleaned}")
+            continue
+        # 12-digit Indian numbers with 91 prefix
+        if re.fullmatch(r"91[6-9]\d{9}", cleaned):
+            recipients.append(f"+{cleaned}")
+            continue
         if re.fullmatch(r"[1-9]\d{7,14}", cleaned):
             recipients.append(f"+{cleaned}")
             continue
