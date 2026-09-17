@@ -18,11 +18,14 @@ from config import (
     HAZARD_YOLO_DEVICE,
     HAZARD_YOLO_HALF,
     HAZARD_YOLO_IMGSZ,
+    MAX_CANDIDATE_CONTOURS,
     MAX_OBJECT_DETECTIONS_PER_FRAME,
     MAX_SURFACE_DETECTIONS_PER_FRAME,
     OBJECT_DETECTION_ENABLED,
     OBJECT_HAZARD_RULES,
     OBJECT_SOURCE_LABEL,
+    ONNX_MODEL_PATH,
+    OPENVINO_MODEL_PATH,
     SEVERITY_ORDER,
     SEVERITY_WEIGHTS,
     SURFACE_SOURCE_LABEL,
@@ -37,6 +40,7 @@ model = None
 model_error = None
 object_model = None
 object_model_error = None
+object_model_type = "pytorch"
 analysis_jobs = {}
 analysis_lock = threading.Lock()
 model_lock = threading.Lock()
@@ -65,18 +69,20 @@ def _resolve_yolo_device():
     return _yolo_device_cached
 
 
-def _yolo_predict(detector, frame):
+def _yolo_predict(detector, frames):
     device = _resolve_yolo_device()
     kwargs = {
         "imgsz": HAZARD_YOLO_IMGSZ,
         "conf": 0.25,
         "verbose": False,
-        "device": device,
     }
+    # OpenVINO / ONNX manage device internally; for PyTorch pass device
+    if not isinstance(frames, list):
+        kwargs["device"] = device
     use_half = HAZARD_YOLO_HALF and device not in ("cpu", "mps")
     if use_half:
         kwargs["half"] = True
-    return detector.predict(frame, **kwargs)
+    return detector.predict(frames, **kwargs)
 
 
 def cleanup_analysis_jobs(now=None):
@@ -160,7 +166,7 @@ def get_model():
 
 
 def get_object_model():
-    global object_model, object_model_error
+    global object_model, object_model_error, object_model_type
     if not OBJECT_DETECTION_ENABLED:
         return None
     if object_model is not None:
@@ -175,7 +181,20 @@ def get_object_model():
         try:
             from ultralytics import YOLO
 
-            object_model = YOLO(DEFAULT_OBJECT_MODEL_NAME)
+            # 1. Prioritize OpenVINO export directory (Intel CPU/iGPU acceleration)
+            if os.path.isdir(OPENVINO_MODEL_PATH):
+                object_model = YOLO(OPENVINO_MODEL_PATH, task="detect")
+                object_model_type = "openvino"
+                logger.info("Loaded OpenVINO accelerated model from %s", OPENVINO_MODEL_PATH)
+            # 2. Prioritize ONNX export if present
+            elif os.path.isfile(ONNX_MODEL_PATH):
+                object_model = YOLO(ONNX_MODEL_PATH, task="detect")
+                object_model_type = "onnx"
+                logger.info("Loaded ONNX accelerated model from %s", ONNX_MODEL_PATH)
+            # 3. Fallback to standard PyTorch weights
+            else:
+                object_model = YOLO(DEFAULT_OBJECT_MODEL_NAME)
+                object_model_type = "pytorch"
         except Exception as exc:
             object_model_error = str(exc).strip() or exc.__class__.__name__
             logger.warning("Object detection model could not be initialized: %s", object_model_error)
@@ -186,7 +205,12 @@ def get_object_model():
 def get_detection_engines(surface_detector, object_detector):
     engines = ["custom hazard model" if surface_detector is not None else "surface heuristic analysis"]
     if object_detector is not None:
-        engines.append("YOLO object detection")
+        if object_model_type == "openvino":
+            engines.append("YOLO object detection (Intel OpenVINO)")
+        elif object_model_type == "onnx":
+            engines.append("YOLO object detection (ONNX)")
+        else:
+            engines.append("YOLO object detection")
     elif OBJECT_DETECTION_ENABLED and object_model_error:
         engines.append("object detection unavailable")
     return engines
@@ -243,11 +267,19 @@ def detect_road_anomalies(frame):
     combined = cv2.morphologyEx(combined, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
     contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     roi_area = roi.shape[0] * roi.shape[1]
-    detections = []
+
+    # Pre-filter by area and select top candidate contours to prevent CPU/RAM thrashing on i3
+    candidate_contours = []
     for contour in contours:
         area = cv2.contourArea(contour)
-        if area < 260 or area > roi_area * 0.08:
-            continue
+        if 260 <= area <= roi_area * 0.08:
+            candidate_contours.append((area, contour))
+
+    candidate_contours.sort(key=lambda item: item[0], reverse=True)
+    candidate_contours = candidate_contours[:MAX_CANDIDATE_CONTOURS]
+
+    detections = []
+    for area, contour in candidate_contours:
         x, y, box_width, box_height = cv2.boundingRect(contour)
         aspect_ratio = box_width / max(box_height, 1)
         if aspect_ratio < 0.5 or aspect_ratio > 3.2:
@@ -269,10 +301,15 @@ def detect_road_anomalies(frame):
         vertical_bias = (y + (box_height / 2)) / max(roi.shape[0], 1)
         lane_center = (x + (box_width / 2)) / max(roi.shape[1], 1)
         lane_bias = 1 - min(1.0, abs(lane_center - 0.5) * 2)
-        contour_mask = np.zeros_like(enhanced)
-        cv2.drawContours(contour_mask, [contour], -1, 255, -1)
-        darkness = 255 - cv2.mean(enhanced, mask=contour_mask)[0]
-        edge_strength = cv2.mean(gradient, mask=contour_mask)[0]
+
+        # Fast patch calculation without allocating full-sized image masks
+        patch_enhanced = enhanced[y : y + box_height, x : x + box_width]
+        patch_gradient = gradient[y : y + box_height, x : x + box_width]
+        if patch_enhanced.size == 0:
+            continue
+        darkness = 255.0 - float(np.mean(patch_enhanced))
+        edge_strength = float(np.mean(patch_gradient))
+
         area_ratio = area / roi_area
         score = darkness * 0.36 + edge_strength * 0.34 + vertical_bias * 18 + lane_bias * 14 + min(16, area / 220)
         if darkness < 40 or edge_strength < 16 or score < 78:
@@ -304,43 +341,59 @@ def detect_with_custom_model(frame, detector):
     return sort_detections(detections, limit=8)
 
 
+def extract_object_hazards_from_result(result, height, width, detector):
+    detections = []
+    if result.boxes is None:
+        return detections
+    for box in result.boxes:
+        cls = int(box.cls[0])
+        confidence = float(box.conf[0])
+        label = normalize_hazard_type(detector.names.get(cls, str(cls)) if isinstance(detector.names, dict) else detector.names[cls])
+        rule = OBJECT_HAZARD_RULES.get(label)
+        if rule is None:
+            continue
+        x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
+        area_ratio = max(0.0, ((x2 - x1) * (y2 - y1)) / max(height * width, 1))
+        bottom_bias = max(0.0, min(1.0, y2 / max(height, 1)))
+        lane_center = ((x1 + x2) / 2) / max(width, 1)
+        lane_bias = 1 - min(1.0, abs(lane_center - 0.5) * 2)
+        if bottom_bias < rule.get("min_bottom_bias", 0.45):
+            continue
+        if area_ratio < rule["min_area_ratio"] and bottom_bias < max(0.76, rule.get("min_bottom_bias", 0.45) + 0.08):
+            continue
+        if lane_bias < 0.2 and area_ratio < rule["min_area_ratio"] * 1.5:
+            continue
+        risk_weight = float(rule.get("risk_weight", 1.0))
+        severity_metric = (
+            rule["base_score"]
+            + (confidence * 22)
+            + (area_ratio * 1350)
+            + (bottom_bias * 16)
+            + (lane_bias * 8)
+        ) * risk_weight
+        if severity_metric < 74:
+            continue
+        detections.append({"type": rule["type"], "severity": severity_from_score(severity_metric), "confidence": round(min(0.95, confidence + (area_ratio * 1.2)), 2), "source": OBJECT_SOURCE_LABEL})
+    return sort_detections(detections, limit=MAX_OBJECT_DETECTIONS_PER_FRAME)
+
+
 def detect_object_hazards(frame, detector):
     height, width = frame.shape[:2]
     results = _yolo_predict(detector, frame)
-    detections = []
-    for result in results:
-        if result.boxes is None:
-            continue
-        for box in result.boxes:
-            cls = int(box.cls[0])
-            confidence = float(box.conf[0])
-            label = normalize_hazard_type(detector.names.get(cls, str(cls)) if isinstance(detector.names, dict) else detector.names[cls])
-            rule = OBJECT_HAZARD_RULES.get(label)
-            if rule is None:
-                continue
-            x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
-            area_ratio = max(0.0, ((x2 - x1) * (y2 - y1)) / max(height * width, 1))
-            bottom_bias = max(0.0, min(1.0, y2 / max(height, 1)))
-            lane_center = ((x1 + x2) / 2) / max(width, 1)
-            lane_bias = 1 - min(1.0, abs(lane_center - 0.5) * 2)
-            if bottom_bias < rule.get("min_bottom_bias", 0.45):
-                continue
-            if area_ratio < rule["min_area_ratio"] and bottom_bias < max(0.76, rule.get("min_bottom_bias", 0.45) + 0.08):
-                continue
-            if lane_bias < 0.2 and area_ratio < rule["min_area_ratio"] * 1.5:
-                continue
-            risk_weight = float(rule.get("risk_weight", 1.0))
-            severity_metric = (
-                rule["base_score"]
-                + (confidence * 22)
-                + (area_ratio * 1350)
-                + (bottom_bias * 16)
-                + (lane_bias * 8)
-            ) * risk_weight
-            if severity_metric < 74:
-                continue
-            detections.append({"type": rule["type"], "severity": severity_from_score(severity_metric), "confidence": round(min(0.95, confidence + (area_ratio * 1.2)), 2), "source": OBJECT_SOURCE_LABEL})
-    return sort_detections(detections, limit=MAX_OBJECT_DETECTIONS_PER_FRAME)
+    if not results:
+        return []
+    return extract_object_hazards_from_result(results[0], height, width, detector)
+
+
+def detect_object_hazards_batch(frames, detector):
+    if not frames:
+        return []
+    results = _yolo_predict(detector, frames)
+    batch_detections = []
+    for frame, result in zip(frames, results):
+        height, width = frame.shape[:2]
+        batch_detections.extend(extract_object_hazards_from_result(result, height, width, detector))
+    return batch_detections
 
 
 def summarize_detections(all_detections, sampled_frames, detection_engines=None):
@@ -393,12 +446,13 @@ def summarize_detections(all_detections, sampled_frames, detection_engines=None)
     }
 
 
-def analyze_saved_video(job_id, path, location_label, source_location, notes):
+def analyze_saved_video(job_id, path, location_label, source_location, notes, coordinates=None):
     cv2 = get_cv2()
     cap = None
     started_at = monotonic()
     try:
-        coordinates = parse_location(location_label)
+        if coordinates is None:
+            coordinates = parse_location(location_label)
         source_location = (source_location or location_label).strip()
         if coordinates is None:
             raise ValueError("Could not understand that road location.")
@@ -412,7 +466,7 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
         fps = cap.get(cv2.CAP_PROP_FPS)
         fps = fps if fps and fps > 0 else 24
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        dynamic_interval = int(round(fps * 1.1))
+        dynamic_interval = int(round(fps * 1.2))
         if total_frames > 0:
             dynamic_interval = max(dynamic_interval, total_frames // max(HAZARD_MAX_FRAMES, 1))
         frame_interval = max(dynamic_interval, HAZARD_MIN_FRAME_INTERVAL)
@@ -422,15 +476,21 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
         scanned_frames = 0
         skipped_frames = 0
         all_detections = []
+        object_frames = []
         previous_gray = None
         set_analysis_job(job_id, status="processing", message="Scanning road surface damage and roadway obstacles...")
         while sampled_frames < max_frames:
+            # Fast frame skipping using cap.grab() (advances demuxer without decoding pixels)
+            if frame_index % frame_interval != 0:
+                if not cap.grab():
+                    break
+                frame_index += 1
+                continue
+
             ret, frame = cap.read()
             if not ret:
                 break
             frame_index += 1
-            if frame_index % frame_interval != 0:
-                continue
             scanned_frames += 1
             frame = resize_frame(frame, max_width=HAZARD_RESIZE_WIDTH)
             has_signal, current_gray = frame_has_enough_signal(frame, previous_gray=previous_gray)
@@ -442,11 +502,17 @@ def analyze_saved_video(job_id, path, location_label, source_location, notes):
 
             sampled_frames += 1
             detections = detect_road_anomalies(frame) if detector is None else detect_with_custom_model(frame, detector)
-            if object_detector is not None and (sampled_frames - 1) % HAZARD_OBJECT_EVERY_N_FRAMES == 0:
-                detections.extend(detect_object_hazards(frame, object_detector))
             all_detections.extend(detections)
-            if sampled_frames % 4 == 0:
+
+            if object_detector is not None and (sampled_frames - 1) % HAZARD_OBJECT_EVERY_N_FRAMES == 0:
+                object_frames.append(frame)
+
+            if sampled_frames % 2 == 0:
                 set_analysis_job(job_id, status="processing", message=f"Analyzed {sampled_frames} frames for surface damage and obstacles so far...")
+
+        # Run batched object detection on collected object frames in a single forward pass
+        if object_detector is not None and object_frames:
+            all_detections.extend(detect_object_hazards_batch(object_frames, object_detector))
         if sampled_frames == 0:
             raise ValueError("No readable frames were found in the uploaded video.")
         summary = summarize_detections(all_detections, sampled_frames, detection_engines=detection_engines)

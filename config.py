@@ -209,12 +209,16 @@ HAZARD_CACHE_TTL_SECONDS = 20
 ANALYSIS_JOB_TTL_SECONDS = 60 * 60
 TRAFFIC_TILE_CACHE_SECONDS = 45
 
-# Hazard analysis performance knobs.
-# Speed: lower HAZARD_MAX_FRAMES, raise HAZARD_MIN_FRAME_INTERVAL, lower HAZARD_YOLO_IMGSZ,
-# raise HAZARD_OBJECT_EVERY_N_FRAMES (skip object YOLO on some frames), set HAZARD_YOLO_DEVICE=cuda:0 if available.
-HAZARD_MAX_FRAMES = max(6, int(os.getenv("HAZARD_MAX_FRAMES", "8")))
+# Models directory and pre-exported paths for acceleration (OpenVINO / ONNX)
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+OPENVINO_MODEL_PATH = os.path.join(MODELS_DIR, "yolov8n_openvino_model")
+ONNX_MODEL_PATH = os.path.join(MODELS_DIR, "yolov8n.onnx")
+
+# Hazard analysis performance knobs optimized for Core i3 + 8GB RAM.
+# Speed: 4 frames max, 480px width, 320px YOLO imgsz, 15 max contours.
+HAZARD_MAX_FRAMES = max(3, int(os.getenv("HAZARD_MAX_FRAMES", "4")))
 HAZARD_MIN_FRAME_INTERVAL = max(6, int(os.getenv("HAZARD_MIN_FRAME_INTERVAL", "15")))
-HAZARD_RESIZE_WIDTH = max(480, int(os.getenv("HAZARD_RESIZE_WIDTH", "640")))
+HAZARD_RESIZE_WIDTH = max(320, int(os.getenv("HAZARD_RESIZE_WIDTH", "480")))
 HAZARD_MIN_BRIGHTNESS_STD = max(
     2.0,
     float(os.getenv("HAZARD_MIN_BRIGHTNESS_STD", "10.0")),
@@ -223,10 +227,12 @@ HAZARD_MIN_FRAME_DIFF = max(
     0.1,
     float(os.getenv("HAZARD_MIN_FRAME_DIFF", "2.0")),
 )
-# Ultralytics: smaller imgsz is faster; 416 favors speed on CPU deployments.
-HAZARD_YOLO_IMGSZ = max(320, min(1280, int(os.getenv("HAZARD_YOLO_IMGSZ", "416"))))
-# Run COCO/object YOLO every N-th analyzed frame (1 = every frame). Surface/custom model still runs every frame.
-HAZARD_OBJECT_EVERY_N_FRAMES = max(1, int(os.getenv("HAZARD_OBJECT_EVERY_N_FRAMES", "3")))
+# Ultralytics: 320px favors speed on CPU/i3 deployments with 4x fewer FLOPs.
+HAZARD_YOLO_IMGSZ = max(256, min(640, int(os.getenv("HAZARD_YOLO_IMGSZ", "320"))))
+# Run COCO/object YOLO every 2nd analyzed frame (e.g. 2 frames out of 4).
+HAZARD_OBJECT_EVERY_N_FRAMES = max(1, int(os.getenv("HAZARD_OBJECT_EVERY_N_FRAMES", "2")))
+# Maximum contours to evaluate per frame in surface heuristic (prevents memory thrashing).
+MAX_CANDIDATE_CONTOURS = max(5, int(os.getenv("MAX_CANDIDATE_CONTOURS", "15")))
 # Empty = auto (CUDA if available, else Apple MPS, else CPU). Examples: "cpu", "0", "cuda:0", "mps"
 HAZARD_YOLO_DEVICE = os.getenv("HAZARD_YOLO_DEVICE", "").strip()
 # FP16 on CUDA only; set HAZARD_YOLO_HALF=1 when using a GPU for a further speedup.

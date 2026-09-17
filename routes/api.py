@@ -231,6 +231,9 @@ def analyze_video():
         return jsonify({"error": "Upload an mp4, mov, avi, mkv, webm, or m4v video file."}), 400
     if not location_label:
         return jsonify({"error": "Add the road location so the result can be saved to the hazard map."}), 400
+    coordinates = parse_location(location_label)
+    if coordinates is None:
+        return jsonify({"error": "Could not understand that road location. Enter a recognized city, landmark, or lat,lon coordinates."}), 400
     filename = secure_filename(file.filename)
     extension = os.path.splitext(filename)[1].lower() or ".mp4"
     path = os.path.join(UPLOAD_FOLDER, f"{uuid.uuid4().hex}{extension}")
@@ -240,7 +243,7 @@ def analyze_video():
         set_analysis_job(job_id, status="processing", message="Upload complete. Analysis started.")
         thread = threading.Thread(
             target=analyze_saved_video,
-            args=(job_id, path, location_label, source_location, notes),
+            args=(job_id, path, location_label, source_location, notes, coordinates),
             daemon=True,
         )
         thread.start()

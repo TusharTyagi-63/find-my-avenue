@@ -5,3 +5,7 @@ static/uploads/
 instance/
 .git
 pdf_extracted.txt
+.venv/
+*openvino_model*
+*.onnx
+models/
