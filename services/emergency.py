@@ -4,6 +4,7 @@ import urllib.parse
 
 from config import (
     ALERT_STATUS_BY_SEVERITY,
+    FAST2SMS_API_KEY,
     INCIDENT_SERVICE_PROFILES,
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
@@ -110,16 +111,17 @@ def build_call_twiml(
     notes_clean = f" Additional information: {notes[:100]}." if notes else ""
 
     english_speech = (
-        f"Attention! This is an urgent alert from Find My Avenue emergency response system. "
-        f"A {eng_severity} {eng_incident} has been reported near {human_location}. "
+        f"Emergency Alert! This is the Find My Avenue Emergency Response Dispatch. "
+        f"A {eng_severity} {eng_incident} has been confirmed near {human_location}. "
         f"{notes_clean} "
-        f"Simulated ambulance and police control room teams have been alerted. Please take immediate action."
+        f"Emergency medical teams, ambulance, and police control have been notified. "
+        f"Immediate response required."
     )
 
     hindi_speech = (
-        f"कृपया ध्यान दें। यह फाइंड माय एवेन्यू आपातकालीन सेवा से एक आवश्यक संदेश है। "
-        f"{human_location} के पास एक {hindi_severity} {hindi_incident} की सूचना मिली है। "
-        f"नजदीकी पुलिस और एम्बुलेंस सहायता को सूचित कर दिया गया है। कृपया तुरंत सहायता प्रदान करें।"
+        f"आपातकालीन सूचना! यह फाइंड माय एवेन्यू आपातकालीन सेवा नियंत्रण कक्ष से आवश्यक संदेश है। "
+        f"{human_location} के पास {hindi_severity} {hindi_incident} की पुष्टि हुई है। "
+        f"एम्बुलेंस और पुलिस राहत दल को तुरंत सूचित कर दिया गया है। कृपया शीघ्र आवश्यक सहायता सुनिश्चित करें।"
     )
 
     response = VoiceResponse()
@@ -130,9 +132,62 @@ def build_call_twiml(
     # 2. Hindi repetition
     response.say(hindi_speech, voice="Polly.Aditi", language="hi-IN")
     response.pause(length=1)
-    response.say("This was an automated emergency broadcast. Thank you.", voice="Polly.Aditi", language="en-IN")
-    response.say("यह एक स्वचालित आपातकालीन संदेश था। धन्यवाद।", voice="Polly.Aditi", language="hi-IN")
+    response.say("Emergency alert broadcast concluded.", voice="Polly.Aditi", language="en-IN")
+    response.say("आपातकालीन चेतावनी संदेश समाप्त।", voice="Polly.Aditi", language="hi-IN")
     return str(response)
+
+
+def send_sms_via_fast2sms(recipient_numbers, message_text):
+    if not FAST2SMS_API_KEY:
+        raise RuntimeError("Fast2SMS is not configured. Add FAST2SMS_API_KEY.")
+    import requests
+    cleaned_numbers = []
+    for num in recipient_numbers:
+        digits = re.sub(r"[^\d]", "", str(num))
+        if digits.startswith("91") and len(digits) == 12:
+            digits = digits[2:]
+        if len(digits) == 10:
+            cleaned_numbers.append(digits)
+    if not cleaned_numbers:
+        raise ValueError("No valid 10-digit Indian mobile numbers found for SMS.")
+
+    url = "https://www.fast2sms.com/dev/bulkV2"
+    payload = {
+        "route": "q",
+        "message": message_text[:160],
+        "language": "english",
+        "flash": 0,
+        "numbers": ",".join(cleaned_numbers),
+    }
+    headers = {
+        "authorization": FAST2SMS_API_KEY,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    resp = requests.post(url, data=payload, headers=headers, timeout=10)
+    data = resp.json()
+    if data.get("return") is True:
+        return [
+            {
+                "channel": "sms",
+                "to": f"+91{num}",
+                "provider": "fast2sms",
+                "status": "delivered",
+                "request_id": data.get("request_id"),
+            }
+            for num in cleaned_numbers
+        ]
+    else:
+        err_msg = ", ".join(data.get("message", ["SMS dispatch failed"]))
+        return [
+            {
+                "channel": "sms",
+                "to": f"+91{num}",
+                "provider": "fast2sms",
+                "status": "failed",
+                "error": err_msg,
+            }
+            for num in cleaned_numbers
+        ]
 
 
 def build_emergency_services(incident_type, severity):
@@ -182,69 +237,90 @@ def deliver_real_notifications(
     severity="high",
     notes="",
 ):
-    client = get_twilio_client()
     results = []
-    if send_sms and not TWILIO_SMS_FROM_NUMBER:
-        raise RuntimeError("Twilio SMS sender is missing. Add TWILIO_SMS_FROM_NUMBER.")
-    if send_call and not TWILIO_VOICE_FROM_NUMBER:
-        raise RuntimeError("Twilio voice sender is missing. Add TWILIO_VOICE_FROM_NUMBER or TWILIO_SMS_FROM_NUMBER.")
-    call_url = get_call_url(road_location, incident_type, severity, notes) if send_call else None
-    for number in recipient_numbers:
-        if send_sms:
+
+    # 1. SMS Dispatch
+    if send_sms:
+        if FAST2SMS_API_KEY:
             try:
-                message = client.messages.create(body=alert_message, from_=TWILIO_SMS_FROM_NUMBER, to=number)
-                results.append(
-                    {
-                        "channel": "sms",
-                        "to": number,
-                        "provider": "twilio",
-                        "status": message.status or "queued",
-                        "sid": message.sid,
-                    }
-                )
+                sms_results = send_sms_via_fast2sms(recipient_numbers, alert_message)
+                results.extend(sms_results)
             except Exception as exc:
-                err_msg = str(exc)
-                if "predefined SMS templates" in err_msg:
-                    # Fallback to Twilio Trial pre-approved template so user physically receives an SMS
-                    try:
-                        trial_body = (
-                            "Reminder: Appt Tue Oct 29, 3:00 PM. Reply C to confirm or R to reschedule. Test message from Twilio."
-                        )
-                        fallback_msg = client.messages.create(body=trial_body, from_=TWILIO_SMS_FROM_NUMBER, to=number)
-                        results.append(
-                            {
-                                "channel": "sms",
-                                "to": number,
-                                "provider": "twilio",
-                                "status": fallback_msg.status or "queued",
-                                "sid": fallback_msg.sid,
-                                "note": "Delivered via Twilio trial template (custom text requires upgraded Twilio account).",
-                            }
-                        )
-                    except Exception:
+                for number in recipient_numbers:
+                    results.append(
+                        {
+                            "channel": "sms",
+                            "to": number,
+                            "provider": "fast2sms",
+                            "status": "failed",
+                            "error": str(exc)[:240],
+                        }
+                    )
+        else:
+            client = get_twilio_client()
+            if not TWILIO_SMS_FROM_NUMBER:
+                raise RuntimeError("Twilio SMS sender is missing. Add TWILIO_SMS_FROM_NUMBER or FAST2SMS_API_KEY.")
+            for number in recipient_numbers:
+                try:
+                    message = client.messages.create(body=alert_message, from_=TWILIO_SMS_FROM_NUMBER, to=number)
+                    results.append(
+                        {
+                            "channel": "sms",
+                            "to": number,
+                            "provider": "twilio",
+                            "status": message.status or "queued",
+                            "sid": message.sid,
+                        }
+                    )
+                except Exception as exc:
+                    err_msg = str(exc)
+                    if "predefined SMS templates" in err_msg:
+                        try:
+                            trial_body = (
+                                "Reminder: Appt Tue Oct 29, 3:00 PM. Reply C to confirm or R to reschedule. Test message from Twilio."
+                            )
+                            fallback_msg = client.messages.create(body=trial_body, from_=TWILIO_SMS_FROM_NUMBER, to=number)
+                            results.append(
+                                {
+                                    "channel": "sms",
+                                    "to": number,
+                                    "provider": "twilio",
+                                    "status": fallback_msg.status or "queued",
+                                    "sid": fallback_msg.sid,
+                                    "note": "Delivered via Twilio trial template.",
+                                }
+                            )
+                        except Exception:
+                            results.append(
+                                {
+                                    "channel": "sms",
+                                    "to": number,
+                                    "provider": "twilio",
+                                    "status": "failed",
+                                    "error": (
+                                        "Twilio Trial restricts custom SMS to Indian numbers without approved templates. "
+                                        "Add FAST2SMS_API_KEY for free instant custom SMS."
+                                    ),
+                                }
+                            )
+                    else:
                         results.append(
                             {
                                 "channel": "sms",
                                 "to": number,
                                 "provider": "twilio",
                                 "status": "failed",
-                                "error": (
-                                    "Twilio Trial restricts custom SMS text to Indian numbers without approved templates. "
-                                    "Voice Call alert works dynamically. Upgrade Twilio account to unlock custom SMS."
-                                ),
+                                "error": err_msg[:240],
                             }
                         )
-                else:
-                    results.append(
-                        {
-                            "channel": "sms",
-                            "to": number,
-                            "provider": "twilio",
-                            "status": "failed",
-                            "error": err_msg[:240],
-                        }
-                    )
-        if send_call:
+
+    # 2. Voice Call Dispatch
+    if send_call:
+        client = get_twilio_client()
+        if not TWILIO_VOICE_FROM_NUMBER:
+            raise RuntimeError("Twilio voice sender is missing. Add TWILIO_VOICE_FROM_NUMBER.")
+        call_url = get_call_url(road_location, incident_type, severity, notes)
+        for number in recipient_numbers:
             try:
                 # Twilio trial accounts forbid inline 'twiml' and require 'url'.
                 call = client.calls.create(to=number, from_=TWILIO_VOICE_FROM_NUMBER, url=call_url)
