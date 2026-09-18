@@ -22,6 +22,7 @@ from db import (
 )
 from services.emergency import (
     build_alert_message_text,
+    build_call_twiml,
     build_dispatch_status,
     build_emergency_services,
     deliver_real_notifications,
@@ -192,6 +193,13 @@ def emergency_api():
         ),
         201,
     )
+
+
+@api_bp.route("/api/emergency/twiml", methods=["GET", "POST"])
+def emergency_twiml():
+    message = request.values.get("message") or "This is a Find My Avenue emergency test alert."
+    twiml_xml = build_call_twiml(message)
+    return Response(twiml_xml, mimetype="application/xml")
 
 
 @api_bp.route("/api/route", methods=["POST"])

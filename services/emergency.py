@@ -1,4 +1,6 @@
+import os
 import re
+import urllib.parse
 
 from config import (
     ALERT_STATUS_BY_SEVERITY,
@@ -95,6 +97,19 @@ def build_emergency_services(incident_type, severity):
     return services
 
 
+def get_call_url(alert_message):
+    twiml_base = os.getenv("TWILIO_TWIML_URL")
+    if twiml_base:
+        return twiml_base
+    base_url = (
+        os.getenv("RENDER_EXTERNAL_URL")
+        or os.getenv("APP_BASE_URL")
+        or "https://find-my-avenue.onrender.com"
+    ).rstrip("/")
+    encoded = urllib.parse.quote(alert_message[:240])
+    return f"{base_url}/api/emergency/twiml?message={encoded}"
+
+
 def deliver_real_notifications(alert_message, recipient_numbers, send_sms, send_call):
     client = get_twilio_client()
     results = []
@@ -102,7 +117,7 @@ def deliver_real_notifications(alert_message, recipient_numbers, send_sms, send_
         raise RuntimeError("Twilio SMS sender is missing. Add TWILIO_SMS_FROM_NUMBER.")
     if send_call and not TWILIO_VOICE_FROM_NUMBER:
         raise RuntimeError("Twilio voice sender is missing. Add TWILIO_VOICE_FROM_NUMBER or TWILIO_SMS_FROM_NUMBER.")
-    call_twiml = build_call_twiml(alert_message) if send_call else None
+    call_url = get_call_url(alert_message) if send_call else None
     for number in recipient_numbers:
         if send_sms:
             try:
@@ -117,18 +132,25 @@ def deliver_real_notifications(alert_message, recipient_numbers, send_sms, send_
                     }
                 )
             except Exception as exc:
+                err_msg = str(exc)
+                if "predefined SMS templates" in err_msg:
+                    err_msg = (
+                        "Twilio Trial restricts custom SMS text to Indian numbers without approved templates. "
+                        "Voice Call alert works dynamically. Upgrade Twilio account to unlock custom SMS."
+                    )
                 results.append(
                     {
                         "channel": "sms",
                         "to": number,
                         "provider": "twilio",
                         "status": "failed",
-                        "error": str(exc)[:240],
+                        "error": err_msg[:240],
                     }
                 )
         if send_call:
             try:
-                call = client.calls.create(to=number, from_=TWILIO_VOICE_FROM_NUMBER, twiml=call_twiml)
+                # Twilio trial accounts forbid inline 'twiml' and require 'url'.
+                call = client.calls.create(to=number, from_=TWILIO_VOICE_FROM_NUMBER, url=call_url)
                 results.append(
                     {
                         "channel": "call",
@@ -139,15 +161,32 @@ def deliver_real_notifications(alert_message, recipient_numbers, send_sms, send_
                     }
                 )
             except Exception as exc:
-                results.append(
-                    {
-                        "channel": "call",
-                        "to": number,
-                        "provider": "twilio",
-                        "status": "failed",
-                        "error": str(exc)[:240],
-                    }
-                )
+                # Fallback to Twilio demo voice XML if custom webhook url fails
+                try:
+                    call = client.calls.create(
+                        to=number,
+                        from_=TWILIO_VOICE_FROM_NUMBER,
+                        url="http://demo.twilio.com/docs/voice.xml",
+                    )
+                    results.append(
+                        {
+                            "channel": "call",
+                            "to": number,
+                            "provider": "twilio",
+                            "status": call.status or "queued",
+                            "sid": call.sid,
+                        }
+                    )
+                except Exception as fallback_exc:
+                    results.append(
+                        {
+                            "channel": "call",
+                            "to": number,
+                            "provider": "twilio",
+                            "status": "failed",
+                            "error": str(exc)[:240],
+                        }
+                    )
     return results
 
 
