@@ -98,15 +98,19 @@
 <span>Real Alert Actions</span>
 <div class="choice-row">
 <label class="choice-pill">
+<input id="sendWhatsappInput" type="checkbox" checked>
+<span>Send WhatsApp alert</span>
+</label>
+<label class="choice-pill">
+<input id="sendCallInput" type="checkbox" checked>
+<span>Place real call</span>
+</label>
+<label class="choice-pill">
 <input id="sendSmsInput" type="checkbox">
 <span>Send real SMS</span>
 </label>
-<label class="choice-pill">
-<input id="sendCallInput" type="checkbox">
-<span>Place real call</span>
-</label>
 </div>
-<div class="helper-note">Use full mobile numbers with country code. Twilio trial accounts usually send only to verified numbers.</div>
+<div class="helper-note">WhatsApp and Calls operate via Twilio. For WhatsApp Sandbox, make sure recipient phone has sent the Twilio join code to <strong>+1 415 523 8886</strong>.</div>
 </div>
 
 <label class="field-group field-span">
@@ -149,6 +153,7 @@ var severityInput = document.getElementById("severityInput");
 var triggerModeInput = document.getElementById("triggerModeInput");
 var linkedHazardInput = document.getElementById("linkedHazardInput");
 var recipientNumbersInput = document.getElementById("recipientNumbersInput");
+var sendWhatsappInput = document.getElementById("sendWhatsappInput");
 var sendSmsInput = document.getElementById("sendSmsInput");
 var sendCallInput = document.getElementById("sendCallInput");
 var alertList = document.getElementById("alertList");
@@ -352,8 +357,8 @@ if (!sourceLocationInput.value.trim()) {
 sourceLocationInput.value = roadLocationInput.value.trim();
 }
 
-if ((sendSmsInput.checked || sendCallInput.checked) && !recipientNumbersInput.value.trim()) {
-showResult("Add at least one test mobile number before sending a real SMS or call.", "error");
+if ((sendWhatsappInput.checked || sendSmsInput.checked || sendCallInput.checked) && !recipientNumbersInput.value.trim()) {
+showResult("Add at least one test mobile number before sending a real WhatsApp message, SMS, or call.", "error");
 return;
 }
 
@@ -367,6 +372,7 @@ linked_hazard_id: linkedHazardInput.value || null,
 emergency_contact_name: this.emergency_contact_name.value.trim(),
 emergency_contact_phone: this.emergency_contact_phone.value.trim(),
 recipient_numbers: recipientNumbersInput.value.trim(),
+send_whatsapp: sendWhatsappInput.checked,
 send_sms: sendSmsInput.checked,
 send_call: sendCallInput.checked,
 notes: this.notes.value.trim()

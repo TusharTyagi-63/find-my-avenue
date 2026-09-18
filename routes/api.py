@@ -107,6 +107,7 @@ def emergency_api():
     raw_recipient_numbers = data.get("recipient_numbers") or ""
     send_sms = bool(data.get("send_sms"))
     send_call = bool(data.get("send_call"))
+    send_whatsapp = bool(data.get("send_whatsapp"))
     linked_hazard_id = data.get("linked_hazard_id")
 
     if not road_location:
@@ -131,20 +132,22 @@ def emergency_api():
         if hazard is None:
             return jsonify({"error": "The selected hazard report was not found."}), 404
 
-    if send_sms or send_call:
+    if send_sms or send_call or send_whatsapp:
         try:
             recipient_numbers = parse_recipient_numbers(raw_recipient_numbers)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         if not recipient_numbers:
-            return jsonify({"error": "Add at least one test mobile number to send a real SMS or call."}), 400
+            return jsonify({"error": "Add at least one test mobile number to send a real WhatsApp message, call, or SMS."}), 400
 
     services_notified = build_emergency_services(incident_type, severity)
     requested_channels = []
-    if send_sms:
-        requested_channels.append("sms")
+    if send_whatsapp:
+        requested_channels.append("whatsapp")
     if send_call:
         requested_channels.append("call")
+    if send_sms:
+        requested_channels.append("sms")
 
     provider = "simulation"
     notification_results = []
@@ -153,8 +156,9 @@ def emergency_api():
             notification_results = deliver_real_notifications(
                 build_alert_message_text(road_location, source_location, incident_type, severity, notes),
                 recipient_numbers,
-                send_sms,
-                send_call,
+                send_sms=send_sms,
+                send_call=send_call,
+                send_whatsapp=send_whatsapp,
                 road_location=road_location,
                 incident_type=incident_type,
                 severity=severity,
@@ -192,7 +196,12 @@ def emergency_api():
                 "message": "Emergency alert created. Dispatch simulation was saved and any requested real notifications were attempted.",
                 "alert": alert,
                 "linked_hazard": hazard,
-                "delivery_summary": summarize_notification_results(notification_results, send_sms, send_call),
+                "delivery_summary": summarize_notification_results(
+                    notification_results,
+                    send_sms=send_sms,
+                    send_call=send_call,
+                    send_whatsapp=send_whatsapp,
+                ),
             }
         ),
         201,

@@ -4,12 +4,14 @@ import urllib.parse
 
 from config import (
     ALERT_STATUS_BY_SEVERITY,
+    D7_API_TOKEN,
     FAST2SMS_API_KEY,
     INCIDENT_SERVICE_PROFILES,
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
     TWILIO_SMS_FROM_NUMBER,
     TWILIO_VOICE_FROM_NUMBER,
+    TWILIO_WHATSAPP_FROM_NUMBER,
 )
 from services.geocoding import resolve_readable_location
 
@@ -86,6 +88,30 @@ def build_alert_message_text(road_location, source_location, incident_type, seve
     if notes:
         message = f"{message} Notes: {notes[:120]}"
     return message
+
+
+def build_whatsapp_alert_text(road_location, incident_type, severity, notes=""):
+    human_location = resolve_readable_location(road_location)
+    eng_incident = (incident_type or "accident").title()
+    eng_severity = (severity or "high").upper()
+    dispatch_status = ALERT_STATUS_BY_SEVERITY.get((severity or "high").lower(), "Immediate dispatch confirmed")
+
+    lines = [
+        "🚨 *FIND MY AVENUE — EMERGENCY ALERT*",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"⚠️ *Incident:* {eng_incident}",
+        f"🔴 *Severity:* {eng_severity}",
+        f"📍 *Location:* {human_location}",
+    ]
+    if notes:
+        lines.append(f"📝 *Details:* {notes[:180]}")
+    lines.extend([
+        f"⚡ *Dispatch Status:* {dispatch_status}",
+        "🚑 *Units:* Emergency medical, ambulance, and police response teams notified.",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "🌐 *Source:* Find My Avenue Emergency Response System",
+    ])
+    return "\n".join(lines)
 
 
 def build_call_twiml(
@@ -190,6 +216,55 @@ def send_sms_via_fast2sms(recipient_numbers, message_text):
         ]
 
 
+def send_sms_via_d7(recipient_numbers, message_text):
+    if not D7_API_TOKEN:
+        raise RuntimeError("D7 Networks is not configured. Add D7_API_TOKEN.")
+    import requests
+    url = "https://api.d7networks.com/messages/v1/send"
+    headers = {
+        "Authorization": f"Bearer {D7_API_TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "messages": [
+            {
+                "channel": "sms",
+                "originator": "SignSMS",
+                "recipients": recipient_numbers,
+                "content": message_text[:160],
+                "msg_type": "text",
+            }
+        ]
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=12)
+    data = resp.json() if resp.text else {}
+    if resp.status_code in (200, 201, 202):
+        return [
+            {
+                "channel": "sms",
+                "to": num,
+                "provider": "d7networks",
+                "status": "delivered",
+            }
+            for num in recipient_numbers
+        ]
+    else:
+        err_msg = data.get("detail") or data.get("message") or resp.text
+        if isinstance(err_msg, list):
+            err_msg = ", ".join(err_msg)
+        return [
+            {
+                "channel": "sms",
+                "to": num,
+                "provider": "d7networks",
+                "status": "failed",
+                "error": str(err_msg)[:240],
+            }
+            for num in recipient_numbers
+        ]
+
+
 def build_emergency_services(incident_type, severity):
     services = []
     for index, service_name in enumerate(
@@ -230,18 +305,74 @@ def get_call_url(road_location="Emergency Location", incident_type="accident", s
 def deliver_real_notifications(
     alert_message,
     recipient_numbers,
-    send_sms,
-    send_call,
+    send_sms=False,
+    send_call=False,
+    send_whatsapp=False,
     road_location="Emergency Location",
     incident_type="accident",
     severity="high",
     notes="",
+    source_location="Emergency Location",
 ):
     results = []
 
-    # 1. SMS Dispatch
+    # 1. WhatsApp Dispatch (Twilio WhatsApp Sandbox)
+    if send_whatsapp:
+        client = get_twilio_client()
+        raw_from = TWILIO_WHATSAPP_FROM_NUMBER or "+14155238886"
+        whatsapp_from = raw_from if raw_from.startswith("whatsapp:") else f"whatsapp:{raw_from}"
+        whatsapp_body = build_whatsapp_alert_text(
+            road_location=road_location,
+            incident_type=incident_type,
+            severity=severity,
+            notes=notes,
+        )
+        for number in recipient_numbers:
+            whatsapp_to = number if number.startswith("whatsapp:") else f"whatsapp:{number}"
+            try:
+                msg = client.messages.create(
+                    body=whatsapp_body,
+                    from_=whatsapp_from,
+                    to=whatsapp_to,
+                )
+                results.append(
+                    {
+                        "channel": "whatsapp",
+                        "to": number,
+                        "provider": "twilio",
+                        "status": msg.status or "queued",
+                        "sid": msg.sid,
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "channel": "whatsapp",
+                        "to": number,
+                        "provider": "twilio",
+                        "status": "failed",
+                        "error": str(exc)[:240],
+                    }
+                )
+
+    # 2. SMS Dispatch
     if send_sms:
-        if FAST2SMS_API_KEY:
+        if D7_API_TOKEN:
+            try:
+                sms_results = send_sms_via_d7(recipient_numbers, alert_message)
+                results.extend(sms_results)
+            except Exception as exc:
+                for number in recipient_numbers:
+                    results.append(
+                        {
+                            "channel": "sms",
+                            "to": number,
+                            "provider": "d7networks",
+                            "status": "failed",
+                            "error": str(exc)[:240],
+                        }
+                    )
+        elif FAST2SMS_API_KEY:
             try:
                 sms_results = send_sms_via_fast2sms(recipient_numbers, alert_message)
                 results.extend(sms_results)
@@ -259,7 +390,7 @@ def deliver_real_notifications(
         else:
             client = get_twilio_client()
             if not TWILIO_SMS_FROM_NUMBER:
-                raise RuntimeError("Twilio SMS sender is missing. Add TWILIO_SMS_FROM_NUMBER or FAST2SMS_API_KEY.")
+                raise RuntimeError("SMS provider is missing. Add D7_API_TOKEN, FAST2SMS_API_KEY, or TWILIO_SMS_FROM_NUMBER.")
             for number in recipient_numbers:
                 try:
                     message = client.messages.create(body=alert_message, from_=TWILIO_SMS_FROM_NUMBER, to=number)
@@ -363,18 +494,20 @@ def deliver_real_notifications(
     return results
 
 
-def summarize_notification_results(results, send_sms, send_call):
-    if not send_sms and not send_call:
-        return "Simulation only. No real SMS or call was requested."
+def summarize_notification_results(results, send_sms=False, send_call=False, send_whatsapp=False):
+    if not send_sms and not send_call and not send_whatsapp:
+        return "Simulation only. No real SMS, call, or WhatsApp alert was requested."
     if not results:
         return "No real notifications were attempted."
     delivered = [item for item in results if item.get("status") not in {"failed", "canceled"}]
     failed = [item for item in results if item.get("status") == "failed"]
     channels = []
-    if send_sms:
-        channels.append(f"SMS attempted: {sum(1 for item in delivered if item['channel'] == 'sms')}")
+    if send_whatsapp:
+        channels.append(f"WhatsApp: {sum(1 for item in delivered if item['channel'] == 'whatsapp')}")
     if send_call:
-        channels.append(f"Calls attempted: {sum(1 for item in delivered if item['channel'] == 'call')}")
+        channels.append(f"Calls: {sum(1 for item in delivered if item['channel'] == 'call')}")
+    if send_sms:
+        channels.append(f"SMS: {sum(1 for item in delivered if item['channel'] == 'sms')}")
     if failed:
         channels.append(f"Failures: {len(failed)}")
     return " | ".join(channels)
