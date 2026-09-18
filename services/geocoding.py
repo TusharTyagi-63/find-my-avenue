@@ -240,3 +240,85 @@ def parse_location(text, focus=None):
     if coordinate_pair is not None:
         return coordinate_pair
     return geocode_location(text, focus=focus)
+
+
+def reverse_geocode(coordinates):
+    if not coordinates:
+        return None
+    try:
+        lat, lon = float(coordinates[0]), float(coordinates[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+    cache_key = ("reverse_geocode", round(lat, 4), round(lon, 4))
+    cached = cache_get(location_cache, cache_key)
+    if cached is not None:
+        return cached
+
+    session = get_http_session()
+
+    # 1. Try OpenRouteService if API key is present
+    if ORS_API_KEY:
+        try:
+            resp = session.get(
+                "https://api.openrouteservice.org/geocode/reverse",
+                params={"api_key": ORS_API_KEY, "point.lat": lat, "point.lon": lon, "size": 1},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                features = resp.json().get("features", [])
+                if features:
+                    props = features[0].get("properties", {})
+                    parts = []
+                    for key in ["name", "street", "locality", "county", "region"]:
+                        val = props.get(key)
+                        if val and val not in parts:
+                            parts.append(val)
+                    if parts:
+                        readable = ", ".join(parts[:3])
+                        cache_set(location_cache, cache_key, readable, LOCATION_CACHE_TTL_SECONDS)
+                        return readable
+        except Exception:
+            pass
+
+    # 2. Fallback to OpenStreetMap Nominatim
+    try:
+        resp = session.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "jsonv2", "addressdetails": 1},
+            headers={"User-Agent": "find-my-avenue/1.0"},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            address = data.get("address", {})
+            parts = []
+            for key in ["road", "suburb", "neighbourhood", "village", "town", "city", "county", "state"]:
+                val = address.get(key)
+                if val and val not in parts:
+                    parts.append(val)
+            if parts:
+                readable = ", ".join(parts[:3])
+            else:
+                readable = data.get("name") or data.get("display_name")
+            if readable:
+                cache_set(location_cache, cache_key, readable, LOCATION_CACHE_TTL_SECONDS)
+                return readable
+    except Exception:
+        pass
+
+    return None
+
+
+def resolve_readable_location(location_input):
+    if not location_input:
+        return "Emergency Location"
+    normalized = str(location_input).strip()
+    coords = parse_coordinate_pair(normalized)
+    if coords is not None:
+        human_name = reverse_geocode(coords)
+        if human_name:
+            return human_name
+        return f"Coordinates {round(coords[0], 2)} North, {round(coords[1], 2)} East"
+    return normalized
+

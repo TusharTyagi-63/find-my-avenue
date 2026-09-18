@@ -155,6 +155,10 @@ def emergency_api():
                 recipient_numbers,
                 send_sms,
                 send_call,
+                road_location=road_location,
+                incident_type=incident_type,
+                severity=severity,
+                notes=notes,
             )
             provider = "twilio"
         except RuntimeError as exc:
@@ -197,8 +201,18 @@ def emergency_api():
 
 @api_bp.route("/api/emergency/twiml", methods=["GET", "POST"])
 def emergency_twiml():
-    message = request.values.get("message") or "This is a Find My Avenue emergency test alert."
-    twiml_xml = build_call_twiml(message)
+    location = request.values.get("location") or request.values.get("road_location") or "Emergency Location"
+    incident_type = request.values.get("incident_type") or "accident"
+    severity = request.values.get("severity") or "high"
+    notes = request.values.get("notes") or ""
+    raw_message = request.values.get("message")
+    twiml_xml = build_call_twiml(
+        road_location=location,
+        incident_type=incident_type,
+        severity=severity,
+        notes=notes,
+        raw_message=raw_message,
+    )
     return Response(twiml_xml, mimetype="application/xml")
 
 
